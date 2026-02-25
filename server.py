@@ -1,9 +1,6 @@
-# server.py (полная версия с экспортом)
 import sqlite3
 import datetime
 import random
-import os
-import json
 from flask import Flask, request, jsonify, g, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -26,8 +23,6 @@ limiter = Limiter(
 )
 
 DATABASE = 'terminal.db'
-EXPORT_DIR = 'exports'
-os.makedirs(EXPORT_DIR, exist_ok=True)
 
 def get_db():
     db = getattr(g, '_database', None)
@@ -299,15 +294,17 @@ def delete_channel(channel_id, owner_id):
         return False, "Канал не найден"
     if channel['owner_id'] != owner_id:
         return False, "Только владелец может удалить канал"
-    # Получаем подписчиков до удаления
+    # Удаляем канал (каскадно удалятся подписчики и сообщения)
+    db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))
+    # Уведомляем бывших подписчиков (их уже нет в таблице, но можно было бы сохранить список до удаления)
+    # Вместо этого отправим системное сообщение всем, кто был подписан (можно сохранить список заранее)
     cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ?', (channel_id,))
     subscribers = [row['user_id'] for row in cursor.fetchall()]
-    db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))
+    db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))  # повтор для каскадного удаления
     db.commit()
     for sub_id in subscribers:
-        if sub_id != owner_id:  # не отправляем владельцу, он уже знает
-            save_message(0, sub_id, f"Канал '{channel['name']}' был удален владельцем.")
-            socketio.emit(f'user_{sub_id}_new_message', {'from': 0}, room=f'user_{sub_id}')
+        save_message(0, sub_id, f"Канал '{channel['name']}' был удален владельцем.")
+        socketio.emit(f'user_{sub_id}_new_message', {'from': 0}, room=f'user_{sub_id}')
     return True, "Канал удалён"
 
 def get_channels_unread_summary(user_id):
@@ -378,6 +375,7 @@ def unread_summary():
     user = get_user_by_id(user_id)
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
+    # Не обновляем last_seen здесь, чтобы не сбивать статистику онлайна
     personal = get_unread_summary(user_id)
     channels = get_channels_unread_summary(user_id)
     return jsonify({'result': {'personal': personal, 'channels': channels}, 'error': None})
@@ -392,12 +390,12 @@ def read_messages():
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
     from_id = data.get('from_id')
-    update_last_seen(user_id)
+    update_last_seen(user_id)  # действие пользователя
     messages = get_undelivered_messages(user_id, from_id)
     return jsonify({'result': messages, 'error': None})
 
 @app.route('/channel/create', methods=['POST'])
-@limiter.limit("10 per minute")
+@limiter.limit("10 per minute")  # ограничение на создание каналов
 def channel_create():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -456,7 +454,7 @@ def channel_unsubscribe():
     return jsonify({'result': [f'Вы отписались от канала "{channel_name}".'], 'error': None})
 
 @app.route('/channel/send', methods=['POST'])
-@limiter.limit("10 per minute")
+@limiter.limit("10 per minute")  # ограничение на отправку в каналы
 def channel_send():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -522,7 +520,7 @@ def channel_delete():
     return jsonify({'result': [msg], 'error': None})
 
 @app.route('/command', methods=['POST'])
-@limiter.limit("30 per minute")
+@limiter.limit("30 per minute")  # общее ограничение на команды
 def handle_command():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -574,123 +572,34 @@ def handle_command():
         result_lines.append(f'Неизвестная команда: {command}')
     return jsonify({'result': result_lines, 'error': None})
 
-@app.route('/export_my_data', methods=['POST'])
-def export_my_data():
-    data = request.get_json()
-    user_id = data.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'Не указан user_id'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-
-    db = get_db()
-    # Получаем последние 100 сообщений, где пользователь отправитель или получатель
-    cursor = db.execute('''
-        SELECT m.id, m.from_id, m.to_id, m.content, m.timestamp,
-               u_from.login as from_login, u_to.login as to_login
-        FROM messages m
-        JOIN users u_from ON m.from_id = u_from.id
-        JOIN users u_to ON m.to_id = u_to.id
-        WHERE m.from_id = ? OR m.to_id = ?
-        ORDER BY m.timestamp DESC
-        LIMIT 100
-    ''', (user_id, user_id))
-    messages = [dict(row) for row in cursor.fetchall()]
-
-    user_data = {
-        'id': user['id'],
-        'login': user['login'],
-        'registered': user['registered'],
-        'last_seen': user['last_selast_seen']
-    }
-
-en']
-    }
-
-    export_data    export = {
-       _data = {
-        'user': user 'user':_data,
-        ' user_data,
-        'messages':messages': messages
- messages
-       }
-
-    filename }
-
-    filename = f"user_{user = f"user_id}_{_{user_id}_{datetime.datetimedatetime.datetime.now().str.now().strftimeftime('%Y('%Y%m%m%d_%H%d_%%MH%M%S')}.%S')}.json"
-json"
-    file    filepath = os.pathpath = os.path.join(.join(EXPORTEXPORT_DIR,_DIR, filename)
- filename)
-    with    with open(filepath, 'w open(filepath, 'w', encoding', encoding='utf-8='utf-8') as') as f:
- f:
-        json.dump        json(export.dump(export_data, f, ensure__data, f,ascii ensure_ascii=False,=False, indent= indent=2)
-
-    return2)
-
-    return jsonify jsonify({'result':({'result': [f' [f'ДанДанныеные сохранены сохранены в файл { в файл {filename}filename}'], ''], 'error':error': None})
-
- None})
-
-@app@app.route('/')
-def index.route('/')
+@app.route('/')
 def index():
-   ():
-    return send_from return send_from_directory_directory('.', 'index('.', 'index.html')
+    return send_from_directory('.', 'index.html')
 
-# ---------.html')
+# ---------- WebSocket события ----------
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
 
-- Web# ---------- WebSocket событияSocket события ----------
-@socket ----------
-io.on@socketio.on('connect('connect')
-def')
-def handle_ handle_connect():
-    printconnect():
-    print('Client('Client connected')
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
 
-@socketio.on connected')
+@socketio.on('subscribe')
+def handle_subscribe(data):
+    user_id = data.get('user_id')
+    if user_id:
+        room = f'user_{user_id}'
+        join_room(room)
+        print(f'User {user_id} subscribed to {room}')
 
-@socket('disio.on('disconnect')
-def handleconnect')
-_disconnectdef handle_disconnect():
-   ():
-    print('Client disconnected print('')
+@socketio.on('unsubscribe')
+def handle_unsubscribe(data):
+    user_id = data.get('user_id')
+    if user_id:
+        room = f'user_{user_id}'
+        leave_room(room)
+        print(f'User {user_id} unsubscribed from {room}')
 
-@sClient disconnected')
-
-ocketio@socketio.on('subscribe')
-def handle.on('subscribe')
-def_subscribe handle_subscribe(data):
-(data):
-    user    user_id =_id = data.get('user data.get('user_id')
-    if_id')
- user_id    if user_id:
-       :
-        room = f'user_{ room = f'user_{user_id}user_id}'
-'
-        join        join_room_room(room)
-       (room print(f)
-        print(f'User'User {user {user_id} subscribed to_id} subscribed to {room {room}')
-
-}')
-
-@socketio.on@socketio.on('un('unsubscribe')
-subscribe')
-def handle_unsubscribedef handle(data):
-_unsubscribe(data):
-    user_id =    user_id = data.get data.get('user('user_id')
-_id')
-    if    if user_id:
-        user_id:
-        room = f' room =user_{ f'user_{user_id}'
-user_id}'
-        leave        leave_room_room(room(room)
-        print(f)
-       'User {user print(f'User {user_id} unsub_id} unscribed from {roomsubscribed from {room}')
-
-}')
-
-if __if __name__name__ == '__main__':
- == '__main__':
-    socket    socketio.run(app,io.run(app, host=' host='0.0.0.0.0.0.0', port=0', port=50005000, debug, debug=False)
-=False)
+if __name__ == '__main__':
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)  # debug=False в продакшене
