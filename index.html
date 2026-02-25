@@ -86,7 +86,7 @@
         .dos-screen {
             flex: 1;
             background: transparent;
-            color: #b0ffb0;
+            color: #b0ffb0;  /* базовый зелёный, будет переопределён через style */
             padding: 16px 20px;
             overflow-y: auto;
             font-size: 16px;
@@ -97,7 +97,7 @@
             user-select: text;
             scrollbar-width: thin;
             scrollbar-color: #4a5b6b #0f1217;
-            text-shadow: 0 0 5px #00ff80, 0 0 12px #00cc66;
+            text-shadow: 0 0 5px currentColor, 0 0 12px currentColor;
             -webkit-overflow-scrolling: touch;
         }
         .dos-screen::-webkit-scrollbar {
@@ -117,7 +117,7 @@
         }
         .output-line {
             margin-bottom: 4px;
-            color: #b0ffb0;
+            color: inherit;  /* наследует цвет от .dos-screen */
             border-bottom: 1px dotted #1e2f3a;
             padding-bottom: 2px;
         }
@@ -144,7 +144,7 @@
             background: transparent;
             border: none;
             border-bottom: 1px solid #2a3a4a;
-            color: #b0ffb0;
+            color: inherit;  /* наследует цвет от .dos-screen */
             font-family: inherit;
             font-size: 16px;
             line-height: 1.5;
@@ -163,7 +163,6 @@
             opacity: 0.8;
         }
 
-        /* Меню автодополнения с категориями */
         .autocomplete-menu {
             position: absolute;
             bottom: 100%;
@@ -198,7 +197,7 @@
             padding: 6px 12px 6px 24px;
             cursor: pointer;
             white-space: nowrap;
-            text-shadow: 0 0 3px #00ff80;
+            text-shadow: 0 0 3px currentColor;
             border-left: 3px solid transparent;
             transition: all 0.1s;
         }
@@ -207,7 +206,7 @@
             background: #1a2a33;
             border-left-color: #6fcf97;
             color: #ffffff;
-            text-shadow: 0 0 8px #00ff80;
+            text-shadow: 0 0 8px currentColor;
         }
         .autocomplete-item.selected {
             background: #1f2f38;
@@ -296,14 +295,26 @@
             let lastUnreadHash = null;
             let autoReadEnabled = false;
             let pendingImageId = null;
+            let currentColor = 'зеленый';  // значение по умолчанию
 
             let currentCompletions = [];
             let selectedCompletionIndex = -1;
 
             let socket = null;
 
+            // Соответствие названий цветов и CSS-цветов
+            const colorMap = {
+                'зеленый': '#b0ffb0',
+                'красный': '#ffb0b0',
+                'синий': '#b0b0ff',
+                'желтый': '#ffffb0',
+                'оранжевый': '#ffc080',
+                'розовый': '#ffb0ff',
+                'голубой': '#b0ffff'
+            };
+
             const commandCategories = {
-                'Основные': ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'онлайн'],
+                'Основные': ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'онлайн', 'каналы', 'цвет'],
                 'Каналы': ['канал создать', 'канал подписаться', 'канал отписаться', 'канал написать', 'канал прочитать', 'канал удалить'],
                 'Изображения': ['загрузить картинку', 'прочитать картинку', 'открепить', 'аватар']
             };
@@ -322,6 +333,15 @@
             function linkify(text) {
                 const urlPattern = /(https?:\/\/[^\s]+)/g;
                 return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
+            }
+
+            function setTextColor(colorName) {
+                currentColor = colorName;
+                const cssColor = colorMap[colorName] || '#b0ffb0';
+                outputArea.style.color = cssColor;
+                commandInput.style.color = cssColor;
+                // Также обновляем цвет текста в ранее выведенных строках через CSS-переменную, но они уже в DOM, 
+                // наследуют цвет от .dos-screen, поэтому достаточно изменить цвет родителя.
             }
 
             function updatePrompt() {
@@ -670,6 +690,10 @@
                     currentLogin = user.login;
                     autoReadEnabled = false;
                     pendingImageId = null;
+                    // Устанавливаем цвет из профиля
+                    if (user.color_pref) {
+                        setTextColor(user.color_pref);
+                    }
                     appendHistory(`Добро пожаловать, ${user.login}!`);
                     await fetchUnreadSummary(false);
                     connectWebSocket();
@@ -772,7 +796,59 @@
                 }
             }
 
-            // ---- Полный список команд в зависимости от статуса ----
+            async function fetchMyChannels() {
+                if (!authenticated) {
+                    appendHistory('Ошибка: необходимо войти в систему.');
+                    return;
+                }
+                try {
+                    const resp = await fetch(`${API_BASE}/my_channels?user_id=${currentUserId}`);
+                    if (!resp.ok) {
+                        appendHistory(`Ошибка HTTP ${resp.status}`);
+                        return;
+                    }
+                    const data = await resp.json();
+                    if (data.error) {
+                        appendHistory(`Ошибка: ${data.error}`);
+                        return;
+                    }
+                    const channels = data.result;
+                    if (channels.length === 0) {
+                        appendHistory('Вы не подписаны ни на один канал.');
+                    } else {
+                        appendHistory('Ваши каналы:');
+                        channels.forEach(ch => {
+                            appendHistory(`  ${ch.name} (владелец: ${ch.owner_login}) — непрочитано: ${ch.unread_count}`);
+                        });
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            async function setUserColor(color) {
+                if (!authenticated) {
+                    appendHistory('Ошибка: необходимо войти в систему.');
+                    return;
+                }
+                try {
+                    const resp = await fetch(`${API_BASE}/set_color`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, color: color })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok && !data.error) {
+                        appendHistory(data.result);
+                        setTextColor(color);
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
             function getAllCommands() {
                 if (!authenticated) {
                     return ['вход', 'регистрация', 'загрузить картинку', 'прочитать картинку', 'онлайн'];
@@ -780,19 +856,17 @@
                     return [
                         'написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё',
                         'помощь', 'выход', 'канал', 'автопрочтение', 'загрузить картинку', 'прочитать картинку',
-                        'открепить', 'онлайн', 'аватар',
+                        'открепить', 'онлайн', 'аватар', 'каналы', 'цвет',
                         'канал создать', 'канал подписаться', 'канал отписаться', 'канал написать', 'канал прочитать', 'канал удалить'
                     ];
                 }
             }
 
-            // ---- Автодополнение с категориями ----
             function showAutocomplete(completions) {
                 if (!completions || completions.length === 0) {
                     hideAutocomplete();
                     return;
                 }
-                // группируем по категориям
                 let categorized = {};
                 for (let cmd of completions) {
                     let found = false;
@@ -845,18 +919,16 @@
 
             function completeWith(completion) {
                 if (!completion) return;
-                commandInput.value = completion;          // заменяем всё поле
+                commandInput.value = completion;
                 commandInput.setSelectionRange(completion.length, completion.length);
                 hideAutocomplete();
             }
 
-            // Получение списка команд, начинающихся с префикса (для Tab)
             function getCompletionList(prefix, prevWord) {
                 const all = getAllCommands();
                 return all.filter(cmd => cmd.startsWith(prefix));
             }
 
-            // ---- Обработка Tab ----
             function handleTab() {
                 if (mode !== 'normal') {
                     hideAutocomplete();
@@ -877,7 +949,6 @@
                 showAutocomplete(completions);
             }
 
-            // ---- Выполнение команды ----
             function executeCommand(cmd) {
                 const trimmed = cmd.trim();
                 if (trimmed === '' && mode === 'normal') return;
@@ -1033,6 +1104,14 @@
                     }
                 } else if (command === 'онлайн') {
                     fetchOnlineUsers();
+                } else if (command === 'каналы') {
+                    fetchMyChannels();
+                } else if (command === 'цвет') {
+                    if (args[0]) {
+                        setUserColor(args[0]);
+                    } else {
+                        appendHistory('Использование: цвет [название]. Доступные цвета: зеленый, красный, синий, желтый, оранжевый, розовый, голубой');
+                    }
                 } else if (command === 'аватар') {
                     if (args[0]) {
                         const imageId = args[0];
@@ -1062,6 +1141,8 @@
                 appendHistory('  прочитать картинку [id]      - открыть изображение');
                 appendHistory('  открепить                    - открепить текущее изображение');
                 appendHistory('  онлайн                       - показать пользователей в сети');
+                appendHistory('  каналы                       - показать каналы, на которые вы подписаны');
+                appendHistory('  цвет [цвет]                  - изменить цвет текста (зеленый, красный, синий, желтый, оранжевый, розовый, голубой)');
                 appendHistory('  аватар [id]                  - установить аватар (ID загруженного изображения)');
                 appendHistory('  помощь                       - эта справка');
                 appendHistory('  выход                        - выйти из аккаунта');
@@ -1103,7 +1184,6 @@
                 render();
             }
 
-            // ---- Обработчики событий ----
             commandInput.addEventListener('input', () => {
                 if (mode !== 'normal') return;
                 const val = commandInput.value.trim().toLowerCase();
@@ -1132,7 +1212,6 @@
                         } else {
                             selectedCompletionIndex = currentCompletions.length - 1;
                         }
-                        // перестроим меню с текущими completion'ами (они уже в currentCompletions)
                         let categorized = {};
                         for (let cmd of currentCompletions) {
                             let found = false;
@@ -1192,7 +1271,6 @@
                         hideAutocomplete();
                         return;
                     }
-                    // При любом другом нажатии меню скрывается (оно перестроится по input)
                 }
 
                 if (e.ctrlKey && key === 'v') {
