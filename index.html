@@ -34,7 +34,6 @@
             overflow: hidden;
         }
 
-        /* ЭЛТ-эффекты */
         .dos-terminal::before {
             content: "";
             position: absolute;
@@ -84,21 +83,20 @@
             100% { opacity: 0.8; }
         }
 
-        /* Контейнер для окон поверх всего, но внутри терминала */
         .windows-container {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            pointer-events: none; /* чтобы клики проходили сквозь контейнер, но не сквозь окна */
+            pointer-events: none;
             z-index: 100;
         }
         .windows-container * {
             pointer-events: auto;
         }
 
-        /* Стили окна в духе Windows 95 */
+        /* Стили окна Win95 */
         .win95-window {
             position: absolute;
             background: #c0c0c0;
@@ -169,12 +167,22 @@
             display: block;
             margin: 0 auto;
         }
-        .win95-window .window-content audio {
+        /* Ретро-плеер внутри окна */
+        .win95-window .window-content .retro-audio {
+            background: #2b2b2b;
+            border: 2px solid #7b7b7b;
+            border-radius: 5px;
+            padding: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .win95-window .window-content .retro-audio audio {
             width: 100%;
-            margin-top: 10px;
+            filter: sepia(1) hue-rotate(60deg) brightness(0.8);
         }
 
-        /* Остальные стили (терминал, ввод, меню) */
+        /* Основной экран терминала */
         .dos-screen {
             flex: 1;
             background: transparent;
@@ -313,6 +321,31 @@
             color: #ffcc99;
         }
 
+        /* Ретро-плеер для сообщений */
+        .retro-audio {
+            background: #2b2b2b;
+            border: 2px solid #7b7b7b;
+            border-radius: 5px;
+            padding: 5px 10px;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            box-shadow: inset 0 0 5px #000, 0 0 0 1px #5a5a5a;
+            margin: 2px 0;
+        }
+        .retro-audio audio {
+            height: 30px;
+            background: transparent;
+            filter: sepia(1) hue-rotate(60deg) brightness(0.8);
+        }
+        .retro-audio .audio-label {
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            text-shadow: 0 0 3px #0f0;
+            white-space: nowrap;
+        }
+
         #fileUpload {
             display: none;
         }
@@ -362,7 +395,6 @@
             <div class="autocomplete-menu" id="autocompleteMenu"></div>
         </div>
         <input type="file" id="fileUpload" accept="image/png, image/jpeg, image/gif, image/bmp, image/webp, audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac">
-        <!-- Контейнер для окон Win95 -->
         <div class="windows-container" id="windowsContainer"></div>
     </div>
 
@@ -398,14 +430,6 @@
 
             let socket = null;
 
-            // Для перетаскивания окон
-            let dragState = {
-                active: false,
-                window: null,
-                offsetX: 0,
-                offsetY: 0
-            };
-
             const colorMap = {
                 'зеленый': '#b0ffb0',
                 'красный': '#ffb0b0',
@@ -424,31 +448,27 @@
 
             const initialLines = [
                 'Добро пожаловать в терминал.',
-                'Доступные команды: вход, регистрация',
+                'Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн',
                 ''
             ];
             history.push(...initialLines);
 
             // --- Функции для окон Win95 ---
             function openMediaWindow(type, id) {
-                // type: 'image' или 'audio'
                 const url = type === 'image' ? `/image/${id}` : `/audio/${id}`;
                 const title = type === 'image' ? `Изображение ID: ${id}` : `Аудио ID: ${id}`;
 
-                // Создаём окно
                 const win = document.createElement('div');
                 win.className = 'win95-window';
                 win.style.left = '50px';
                 win.style.top = '50px';
-                win.style.width = '400px';
+                win.style.width = type === 'image' ? '400px' : '300px';
                 win.style.height = type === 'image' ? '300px' : '150px';
 
-                // Заголовок
                 const titleBar = document.createElement('div');
                 titleBar.className = 'title-bar';
                 titleBar.innerHTML = `<span class="title">${title}</span><span class="close-btn">×</span>`;
 
-                // Контент
                 const content = document.createElement('div');
                 content.className = 'window-content';
                 if (type === 'image') {
@@ -457,24 +477,25 @@
                     img.alt = title;
                     content.appendChild(img);
                 } else {
+                    const retroDiv = document.createElement('div');
+                    retroDiv.className = 'retro-audio';
                     const audio = document.createElement('audio');
                     audio.controls = true;
                     audio.src = url;
-                    content.appendChild(audio);
+                    retroDiv.appendChild(audio);
+                    content.appendChild(retroDiv);
                 }
 
                 win.appendChild(titleBar);
                 win.appendChild(content);
                 windowsContainer.appendChild(win);
 
-                // Закрытие
                 const closeBtn = titleBar.querySelector('.close-btn');
                 closeBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     win.remove();
                 });
 
-                // Перетаскивание
                 let isDragging = false;
                 let offsetX, offsetY;
 
@@ -493,7 +514,6 @@
                     const containerRect = windowsContainer.getBoundingClientRect();
                     let newLeft = e.clientX - offsetX - containerRect.left;
                     let newTop = e.clientY - offsetY - containerRect.top;
-                    // Ограничиваем, чтобы окно не уходило за пределы контейнера
                     newLeft = Math.max(0, Math.min(containerRect.width - win.offsetWidth, newLeft));
                     newTop = Math.max(0, Math.min(containerRect.height - win.offsetHeight, newTop));
                     win.style.left = newLeft + 'px';
@@ -508,13 +528,11 @@
                 });
             }
 
-            // --- Остальные функции ---
             function escapeHTML(str) {
                 return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
             }
 
             function linkify(text) {
-                // Заменяем URL на ссылки, но оставляем наши медиа-ссылки нетронутыми
                 const urlPattern = /(https?:\/\/[^\s]+)/g;
                 return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
             }
@@ -544,12 +562,12 @@
                     if (typeof lineObj === 'object' && lineObj.text !== undefined) {
                         let escaped = escapeHTML(lineObj.text);
                         let linked = linkify(escaped);
-                        // Добавляем кликабельные ссылки для медиа
                         if (lineObj.imageId) {
                             linked += ` <span class="media-link" onclick="openMediaWindow('image', ${lineObj.imageId})">[Изображение ID: ${lineObj.imageId}]</span>`;
                         }
                         if (lineObj.audioId) {
-                            linked += ` <span class="media-link" onclick="openMediaWindow('audio', ${lineObj.audioId})">[Аудио ID: ${lineObj.audioId}]</span>`;
+                            // Для аудио добавляем стилизованный плеер
+                            linked += ` <div class="retro-audio"><audio controls src="/audio/${lineObj.audioId}"></audio><span class="audio-label">ID: ${lineObj.audioId}</span></div>`;
                         }
                         html += `<div class="output-line">${linked}</div>`;
                     } else {
@@ -666,7 +684,7 @@
                                 appendHistory('Все сообщения прочитаны.');
                             }
                         } else {
-                            // silent режим: просто обновляем хеш, ничего не выводим
+                            // silent
                         }
                     }
                     return { personal, channels };
@@ -1300,6 +1318,7 @@
                     pendingImageId = null;
                     pendingAudioId = null;
                     disconnectWebSocket();
+                    setTextColor('зеленый'); // сбрасываем цвет
                     appendHistory('Вы вышли из аккаунта.');
                     appendHistory('Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн');
                 } else if (command === 'загрузить' && args[0] === 'картинку') {
@@ -1560,7 +1579,6 @@
                 setTimeout(() => hideAutocomplete(), 200);
             });
 
-            // Делаем функцию открытия окон глобальной, чтобы её можно было вызывать из onclick
             window.openMediaWindow = openMediaWindow;
 
             render();
