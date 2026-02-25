@@ -11,20 +11,17 @@ from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__, static_folder='.', static_url_path='')
-app.config['SECRET_KEY'] = 'your-secret-key-here'  # Измените в продакшене!
+app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB макс. размер файла
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
 
 CORS(app)
 
-# Создаём папку для загрузок, если её нет
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Настройка SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Настройка лимитера (хранилище в памяти)
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
@@ -57,7 +54,9 @@ def init_db():
                 login TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                avatar_id INTEGER,
+                FOREIGN KEY(avatar_id) REFERENCES images(id)
             )
         ''')
         # Личные сообщения
@@ -133,7 +132,7 @@ def init_db():
                 FOREIGN KEY(uploader_id) REFERENCES users(id)
             )
         ''')
-        # Индексы для ускорения
+        # Индексы
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_to_delivered ON messages(to_id, delivered)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_channels_name_active ON channels(name, active)')
@@ -141,7 +140,6 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_uploader ON images(uploader_id)')
 
-        # Системный пользователь (для уведомлений)
         cursor.execute("INSERT OR IGNORE INTO users (id, login, password_hash) VALUES (0, 'system', '')")
         db.commit()
 
@@ -238,7 +236,6 @@ def save_message(from_id, to_id, content, image_id=None):
         INSERT INTO messages (from_id, to_id, content, delivered, image_id) VALUES (?, ?, ?, 0, ?)
     ''', (from_id, to_id, content, image_id))
     db.commit()
-    # Уведомление через WebSocket
     socketio.emit(f'user_{to_id}_new_message', {'from': from_id}, room=f'user_{to_id}')
 
 def get_channel_by_name(name):
@@ -276,7 +273,6 @@ def add_channel_message(channel_id, user_id, content, image_id=None):
     ''', (channel_id, user_id, content, image_id))
     db.commit()
     msg_id = cursor.lastrowid
-    # Уведомить всех подписчиков канала
     cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ?', (channel_id,))
     subscribers = [row['user_id'] for row in cursor.fetchall()]
     for sub_id in subscribers:
@@ -342,10 +338,8 @@ def delete_channel(channel_id, owner_id):
         return False, "Канал не найден"
     if channel['owner_id'] != owner_id:
         return False, "Только владелец может удалить канал"
-    # Получаем подписчиков до удаления
     cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ?', (channel_id,))
     subscribers = [row['user_id'] for row in cursor.fetchall()]
-    # Удаляем канал (каскадно удалятся подписчики и сообщения)
     db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))
     db.commit()
     for sub_id in subscribers:
@@ -386,7 +380,7 @@ def get_online_users(minutes=2):
     ''', (cutoff.isoformat(),))
     return [dict(row) for row in cursor.fetchall()]
 
-# ---------- Эндпоинты API ----------
+# ---------- Эндпоинты ----------
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -418,7 +412,8 @@ def login():
         'result': [{
             'id': user['id'],
             'login': user['login'],
-            'registered': user['registered']
+            'registered': user['registered'],
+            'avatar_id': user['avatar_id']
         }],
         'error': None
     })
@@ -445,7 +440,7 @@ def read_messages():
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
     from_id = data.get('from_id')
-    update_last_seen(user_id)  # действие пользователя
+    update_last_seen(user_id)
     messages = get_undelivered_messages(user_id, from_id)
     return jsonify({'result': messages, 'error': None})
 
@@ -515,7 +510,7 @@ def channel_send():
     user_id = data.get('user_id')
     channel_name = data.get('channel_name', '').strip()
     content = data.get('content', '').strip()
-    image_id = data.get('image_id')  # может быть None
+    image_id = data.get('image_id')
     if not user_id or not channel_name or (not content and not image_id):
         return jsonify({'error': 'Не указан user_id, название канала или сообщение/изображение'}), 400
     if content and len(content) > 1000:
@@ -625,7 +620,24 @@ def handle_command():
                 result_lines.append(f'Логин: {profile_user["login"]}')
                 result_lines.append(f'ID: {profile_user["id"]}')
                 result_lines.append(f'Дата регистрации: {profile_user["registered"]}')
+                if profile_user['avatar_id']:
+                    result_lines.append(f'Аватар ID: {profile_user["avatar_id"]}')
                 result_lines.append(f'Статус: {status}')
+    elif command == 'аватар':
+        image_id = args.get('image_id')
+        if not image_id:
+            result_lines.append('Ошибка: укажите ID изображения.')
+        else:
+            # Проверим, что изображение существует и принадлежит пользователю
+            db = get_db()
+            cursor = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, user_id))
+            if not cursor.fetchone():
+                result_lines.append('Ошибка: изображение не найдено или вы не являетесь его владельцем.')
+            else:
+                db.execute('UPDATE users SET avatar_id = ? WHERE id = ?', (image_id, user_id))
+                db.commit()
+                result_lines.append(f'Аватар установлен. ID изображения: {image_id}')
+                update_last_seen(user_id)
     elif command == 'пинг':
         result_lines.append('понг')
     else:
@@ -653,11 +665,9 @@ def upload_image():
         return jsonify({'error': 'Файл не выбран'}), 400
     if not allowed_file(file.filename):
         return jsonify({'error': 'Недопустимый тип файла. Разрешены: png, jpg, jpeg, gif, bmp, webp'}), 400
-    # Генерируем уникальное имя
     ext = file.filename.rsplit('.', 1)[1].lower()
     stored_filename = f"{uuid.uuid4().hex}.{ext}"
     file.save(os.path.join(app.config['UPLOAD_FOLDER'], stored_filename))
-    # Сохраняем в БД
     db = get_db()
     cursor = db.cursor()
     cursor.execute('''
@@ -681,7 +691,7 @@ def get_image(image_id):
 def index():
     return send_from_directory('.', 'index.html')
 
-# ---------- WebSocket события ----------
+# ---------- WebSocket ----------
 @socketio.on('connect')
 def handle_connect():
     print('Client connected')
