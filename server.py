@@ -13,7 +13,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 app = Flask(__name__, static_folder='.', static_url_path='')
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
 
 CORS(app)
@@ -56,6 +56,7 @@ def init_db():
                 registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 avatar_id INTEGER,
+                color_pref TEXT DEFAULT 'зеленый',
                 FOREIGN KEY(avatar_id) REFERENCES images(id)
             )
         ''')
@@ -362,6 +363,21 @@ def get_channels_unread_summary(user_id):
     ''', (user_id, user_id))
     return [dict(row) for row in cursor.fetchall()]
 
+def get_user_channels(user_id):
+    db = get_db()
+    cursor = db.execute('''
+        SELECT c.id, c.name, c.owner_id, u.login as owner_login,
+               (SELECT COUNT(*) FROM channel_messages cm
+                LEFT JOIN channel_read_status crs ON crs.channel_id = c.id AND crs.user_id = ?
+                WHERE cm.channel_id = c.id AND cm.id > IFNULL(crs.last_read_message_id, 0)) as unread_count
+        FROM channels c
+        JOIN users u ON c.owner_id = u.id
+        JOIN channel_subscribers cs ON cs.channel_id = c.id
+        WHERE cs.user_id = ? AND c.active = 1
+        ORDER BY c.name
+    ''', (user_id, user_id))
+    return [dict(row) for row in cursor.fetchall()]
+
 def is_online(user_id, minutes=2):
     user = get_user_by_id(user_id)
     if not user:
@@ -413,7 +429,8 @@ def login():
             'id': user['id'],
             'login': user['login'],
             'registered': user['registered'],
-            'avatar_id': user['avatar_id']
+            'avatar_id': user['avatar_id'],
+            'color_pref': user['color_pref']
         }],
         'error': None
     })
@@ -622,13 +639,13 @@ def handle_command():
                 result_lines.append(f'Дата регистрации: {profile_user["registered"]}')
                 if profile_user['avatar_id']:
                     result_lines.append(f'Аватар ID: {profile_user["avatar_id"]}')
+                result_lines.append(f'Цвет текста: {profile_user["color_pref"]}')
                 result_lines.append(f'Статус: {status}')
     elif command == 'аватар':
         image_id = args.get('image_id')
         if not image_id:
             result_lines.append('Ошибка: укажите ID изображения.')
         else:
-            # Проверим, что изображение существует и принадлежит пользователю
             db = get_db()
             cursor = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, user_id))
             if not cursor.fetchone():
@@ -649,6 +666,37 @@ def online_users():
     minutes = request.args.get('minutes', default=2, type=int)
     users = get_online_users(minutes)
     return jsonify({'result': users, 'error': None})
+
+@app.route('/my_channels', methods=['GET'])
+def my_channels():
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Не указан user_id'}), 400
+    user = get_user_by_id(user_id)
+    if not user:
+        return jsonify({'error': 'Пользователь не найден'}), 404
+    channels = get_user_channels(user_id)
+    return jsonify({'result': channels, 'error': None})
+
+@app.route('/set_color', methods=['POST'])
+def set_color():
+    data = request.get_json()
+    user_id = data.get('user_id')
+    color = data.get('color')
+    if not user_id or not color:
+        return jsonify({'error': 'Не указан user_id или цвет'}), 400
+    user = get_user_by_id(user_id)
+    if not user:
+        return jsonify({'error': 'Пользователь не найден'}), 404
+    # допустимые цвета
+    valid_colors = ['зеленый', 'красный', 'синий', 'желтый', 'оранжевый', 'розовый', 'голубой']
+    if color not in valid_colors:
+        return jsonify({'error': f'Недопустимый цвет. Доступны: {", ".join(valid_colors)}'}), 400
+    db = get_db()
+    db.execute('UPDATE users SET color_pref = ? WHERE id = ?', (color, user_id))
+    db.commit()
+    update_last_seen(user_id)
+    return jsonify({'result': f'Цвет текста изменён на {color}', 'error': None})
 
 @app.route('/upload_image', methods=['POST'])
 def upload_image():
