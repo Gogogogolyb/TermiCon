@@ -34,6 +34,7 @@
             overflow: hidden;
         }
 
+        /* ЭЛТ-эффекты */
         .dos-terminal::before {
             content: "";
             position: absolute;
@@ -83,6 +84,97 @@
             100% { opacity: 0.8; }
         }
 
+        /* Контейнер для окон поверх всего, но внутри терминала */
+        .windows-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* чтобы клики проходили сквозь контейнер, но не сквозь окна */
+            z-index: 100;
+        }
+        .windows-container * {
+            pointer-events: auto;
+        }
+
+        /* Стили окна в духе Windows 95 */
+        .win95-window {
+            position: absolute;
+            background: #c0c0c0;
+            border: 2px solid;
+            border-top-color: #f0f0f0;
+            border-left-color: #f0f0f0;
+            border-right-color: #404040;
+            border-bottom-color: #404040;
+            box-shadow: 2px 2px 0 rgba(0,0,0,0.5);
+            font-family: 'MS Sans Serif', 'Courier New', monospace;
+            font-size: 12px;
+            min-width: 200px;
+            min-height: 100px;
+            z-index: 101;
+            pointer-events: auto;
+            resize: both;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .win95-window .title-bar {
+            background: #000080;
+            color: white;
+            padding: 3px 5px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: move;
+            user-select: none;
+        }
+        .win95-window .title-bar .title {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .win95-window .title-bar .close-btn {
+            background: #c0c0c0;
+            border: 1px solid;
+            border-top-color: #f0f0f0;
+            border-left-color: #f0f0f0;
+            border-right-color: #404040;
+            border-bottom-color: #404040;
+            color: black;
+            width: 20px;
+            height: 20px;
+            text-align: center;
+            line-height: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-left: 5px;
+        }
+        .win95-window .title-bar .close-btn:active {
+            border-top-color: #404040;
+            border-left-color: #404040;
+            border-right-color: #f0f0f0;
+            border-bottom-color: #f0f0f0;
+        }
+        .win95-window .window-content {
+            flex: 1;
+            padding: 10px;
+            background: #c0c0c0;
+            overflow: auto;
+        }
+        .win95-window .window-content img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+        }
+        .win95-window .window-content audio {
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        /* Остальные стили (терминал, ввод, меню) */
         .dos-screen {
             flex: 1;
             background: transparent;
@@ -212,46 +304,13 @@
             background: #1f2f38;
         }
 
-        .image-link {
+        .media-link {
             color: #ffaa66;
             text-decoration: underline;
             cursor: pointer;
         }
-        .image-link:hover {
+        .media-link:hover {
             color: #ffcc99;
-        }
-
-        /* Стили для аудиоплеера */
-        .audio-player {
-            display: inline-flex;
-            align-items: center;
-            background: #0f141a;
-            border: 1px solid #2a3a4a;
-            border-radius: 4px;
-            padding: 4px 8px;
-            margin: 2px 0;
-            color: #b0ffb0;
-            font-size: 14px;
-        }
-        .audio-player audio {
-            height: 30px;
-            width: 200px;
-            background: transparent;
-            filter: invert(1) hue-rotate(90deg); /* зелёная тема */
-            border-radius: 4px;
-        }
-        .audio-player audio::-webkit-media-controls-panel {
-            background: #0f141a;
-            border: 1px solid #2a3a4a;
-        }
-        .audio-player audio::-webkit-media-controls-current-time-display,
-        .audio-player audio::-webkit-media-controls-time-remaining-display {
-            color: #b0ffb0;
-            text-shadow: 0 0 3px #00ff80;
-        }
-        .audio-player span {
-            margin-left: 8px;
-            color: #6fcf97;
         }
 
         #fileUpload {
@@ -290,9 +349,6 @@
                 left: 10px;
                 right: 10px;
             }
-            .audio-player audio {
-                width: 150px;
-            }
         }
     </style>
     <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
@@ -302,10 +358,12 @@
         <div class="dos-screen" id="outputArea"></div>
         <div class="input-line">
             <span class="prompt" id="prompt"></span>
-            <input type="text" currentColor="зеленый" class="terminal-input" id="commandInput" autofocus placeholder="Введите команду">
+            <input type="text" class="terminal-input" id="commandInput" autofocus placeholder="Введите команду">
             <div class="autocomplete-menu" id="autocompleteMenu"></div>
         </div>
         <input type="file" id="fileUpload" accept="image/png, image/jpeg, image/gif, image/bmp, image/webp, audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac">
+        <!-- Контейнер для окон Win95 -->
+        <div class="windows-container" id="windowsContainer"></div>
     </div>
 
     <script>
@@ -317,6 +375,7 @@
             const commandInput = document.getElementById('commandInput');
             const fileInput = document.getElementById('fileUpload');
             const autocompleteMenu = document.getElementById('autocompleteMenu');
+            const windowsContainer = document.getElementById('windowsContainer');
 
             let history = [];
             let commandHistory = [];
@@ -338,6 +397,14 @@
             let selectedCompletionIndex = -1;
 
             let socket = null;
+
+            // Для перетаскивания окон
+            let dragState = {
+                active: false,
+                window: null,
+                offsetX: 0,
+                offsetY: 0
+            };
 
             const colorMap = {
                 'зеленый': '#b0ffb0',
@@ -362,11 +429,92 @@
             ];
             history.push(...initialLines);
 
+            // --- Функции для окон Win95 ---
+            function openMediaWindow(type, id) {
+                // type: 'image' или 'audio'
+                const url = type === 'image' ? `/image/${id}` : `/audio/${id}`;
+                const title = type === 'image' ? `Изображение ID: ${id}` : `Аудио ID: ${id}`;
+
+                // Создаём окно
+                const win = document.createElement('div');
+                win.className = 'win95-window';
+                win.style.left = '50px';
+                win.style.top = '50px';
+                win.style.width = '400px';
+                win.style.height = type === 'image' ? '300px' : '150px';
+
+                // Заголовок
+                const titleBar = document.createElement('div');
+                titleBar.className = 'title-bar';
+                titleBar.innerHTML = `<span class="title">${title}</span><span class="close-btn">×</span>`;
+
+                // Контент
+                const content = document.createElement('div');
+                content.className = 'window-content';
+                if (type === 'image') {
+                    const img = document.createElement('img');
+                    img.src = url;
+                    img.alt = title;
+                    content.appendChild(img);
+                } else {
+                    const audio = document.createElement('audio');
+                    audio.controls = true;
+                    audio.src = url;
+                    content.appendChild(audio);
+                }
+
+                win.appendChild(titleBar);
+                win.appendChild(content);
+                windowsContainer.appendChild(win);
+
+                // Закрытие
+                const closeBtn = titleBar.querySelector('.close-btn');
+                closeBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    win.remove();
+                });
+
+                // Перетаскивание
+                let isDragging = false;
+                let offsetX, offsetY;
+
+                titleBar.addEventListener('mousedown', (e) => {
+                    if (e.target === closeBtn) return;
+                    isDragging = true;
+                    const rect = win.getBoundingClientRect();
+                    offsetX = e.clientX - rect.left;
+                    offsetY = e.clientY - rect.top;
+                    win.style.cursor = 'move';
+                    e.preventDefault();
+                });
+
+                document.addEventListener('mousemove', (e) => {
+                    if (!isDragging) return;
+                    const containerRect = windowsContainer.getBoundingClientRect();
+                    let newLeft = e.clientX - offsetX - containerRect.left;
+                    let newTop = e.clientY - offsetY - containerRect.top;
+                    // Ограничиваем, чтобы окно не уходило за пределы контейнера
+                    newLeft = Math.max(0, Math.min(containerRect.width - win.offsetWidth, newLeft));
+                    newTop = Math.max(0, Math.min(containerRect.height - win.offsetHeight, newTop));
+                    win.style.left = newLeft + 'px';
+                    win.style.top = newTop + 'px';
+                });
+
+                document.addEventListener('mouseup', () => {
+                    if (isDragging) {
+                        isDragging = false;
+                        win.style.cursor = 'default';
+                    }
+                });
+            }
+
+            // --- Остальные функции ---
             function escapeHTML(str) {
                 return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
             }
 
             function linkify(text) {
+                // Заменяем URL на ссылки, но оставляем наши медиа-ссылки нетронутыми
                 const urlPattern = /(https?:\/\/[^\s]+)/g;
                 return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
             }
@@ -396,11 +544,12 @@
                     if (typeof lineObj === 'object' && lineObj.text !== undefined) {
                         let escaped = escapeHTML(lineObj.text);
                         let linked = linkify(escaped);
+                        // Добавляем кликабельные ссылки для медиа
                         if (lineObj.imageId) {
-                            linked += ` <span class="image-link" onclick="window.open('/image/${lineObj.imageId}')">[Изображение ID: ${lineObj.imageId}]</span>`;
+                            linked += ` <span class="media-link" onclick="openMediaWindow('image', ${lineObj.imageId})">[Изображение ID: ${lineObj.imageId}]</span>`;
                         }
                         if (lineObj.audioId) {
-                            linked += ` <div class="audio-player"><audio controls src="/audio/${lineObj.audioId}"></audio> <span>Аудио ID: ${lineObj.audioId}</span></div>`;
+                            linked += ` <span class="media-link" onclick="openMediaWindow('audio', ${lineObj.audioId})">[Аудио ID: ${lineObj.audioId}]</span>`;
                         }
                         html += `<div class="output-line">${linked}</div>`;
                     } else {
@@ -527,7 +676,6 @@
                 }
             }
 
-            // Автоматическое чтение всех личных сообщений с выводом
             async function autoReadAllPersonal() {
                 if (!authenticated || !currentUserId) return;
                 try {
@@ -552,10 +700,8 @@
                 }
             }
 
-            // Автоматическое чтение всех каналов с выводом
             async function autoReadAllChannels() {
                 if (!authenticated || !currentUserId) return;
-                // Получаем список каналов с непрочитанными
                 try {
                     const summary = await fetchUnreadSummary(true);
                     if (!summary) return;
@@ -567,9 +713,7 @@
                         });
                         if (resp.ok) {
                             const data = await resp.json();
-                            // data.result — массив строк (уже форматированных)
-                            // но они не содержат image_id и audio_id отдельно, поэтому выводим как есть
-                            if (data.result && data.result.length > 1) { // первая строка — заголовок
+                            if (data.result && data.result.length > 1) {
                                 appendHistory(`📢 Канал "${ch.channel_name}":`);
                                 for (let i = 1; i < data.result.length; i++) {
                                     appendHistory(data.result[i]);
@@ -624,8 +768,6 @@
                     });
                     const data = await resp.json();
                     if (resp.ok && !data.error) {
-                        // data.result — массив строк, но image_id/audio_id не выделены отдельно
-                        // поэтому выводим как есть
                         data.result.forEach(line => appendHistory(line));
                         await fetchUnreadSummary(true);
                     } else {
@@ -801,7 +943,7 @@
             function uploadFile(file) {
                 const formData = new FormData();
                 formData.append('user_id', currentUserId);
-                formData.append('image', file); // имя поля остаётся image для совместимости, сервер сам определит тип
+                formData.append('image', file);
 
                 fetch(`${API_BASE}/upload_image`, {
                     method: 'POST',
@@ -1054,11 +1196,9 @@
                         fileInput.accept = 'audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac';
                         fileInput.click();
                     } else if (command === 'прочитать' && args[0] === 'картинку' && args[1]) {
-                        const imageId = args[1];
-                        window.open(`/image/${imageId}`, '_blank');
+                        openMediaWindow('image', args[1]);
                     } else if (command === 'прослушать' && args[0] === 'музыку' && args[1]) {
-                        const audioId = args[1];
-                        window.open(`/audio/${audioId}`, '_blank');
+                        openMediaWindow('audio', args[1]);
                     } else if (command === 'онлайн') {
                         fetchOnlineUsers();
                     } else {
@@ -1114,7 +1254,6 @@
                             chName = trimmedArgs.substring(0, spaceIndex).trim();
                             message = trimmedArgs.substring(spaceIndex + 1).trim();
                         }
-                        // Если есть pending-медиа, прикрепляем
                         channelSend(chName, message, pendingImageId, pendingAudioId);
                         pendingImageId = null;
                         pendingAudioId = null;
@@ -1170,11 +1309,9 @@
                     fileInput.accept = 'audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac';
                     fileInput.click();
                 } else if (command === 'прочитать' && args[0] === 'картинку' && args[1]) {
-                    const imageId = args[1];
-                    window.open(`/image/${imageId}`, '_blank');
+                    openMediaWindow('image', args[1]);
                 } else if (command === 'прослушать' && args[0] === 'музыку' && args[1]) {
-                    const audioId = args[1];
-                    window.open(`/audio/${audioId}`, '_blank');
+                    openMediaWindow('audio', args[1]);
                 } else if (command === 'открепить') {
                     if (pendingImageId || pendingAudioId) {
                         pendingImageId = null;
@@ -1220,8 +1357,8 @@
                 appendHistory('  автопрочтение [вкл|выкл]     - включить/выключить авто-прочтение (с выводом)');
                 appendHistory('  загрузить картинку           - открыть проводник для выбора изображения');
                 appendHistory('  загрузить музыку             - открыть проводник для выбора аудио');
-                appendHistory('  прочитать картинку [id]      - открыть изображение');
-                appendHistory('  прослушать музыку [id]       - открыть аудио');
+                appendHistory('  прочитать картинку [id]      - открыть изображение в окне');
+                appendHistory('  прослушать музыку [id]       - открыть аудиоплеер в окне');
                 appendHistory('  открепить                    - открепить текущее медиа');
                 appendHistory('  онлайн                       - показать пользователей в сети');
                 appendHistory('  каналы                       - показать каналы, на которые вы подписаны');
@@ -1422,6 +1559,9 @@
             commandInput.addEventListener('blur', () => {
                 setTimeout(() => hideAutocomplete(), 200);
             });
+
+            // Делаем функцию открытия окон глобальной, чтобы её можно было вызывать из onclick
+            window.openMediaWindow = openMediaWindow;
 
             render();
         })();
