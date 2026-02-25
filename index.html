@@ -302,7 +302,6 @@
 
             let socket = null;
 
-            // Категории команд для меню
             const commandCategories = {
                 'Основные': ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'онлайн'],
                 'Каналы': ['канал создать', 'канал подписаться', 'канал отписаться', 'канал написать', 'канал прочитать', 'канал удалить'],
@@ -773,27 +772,27 @@
                 }
             }
 
-            function getCompletionList(prefix, prevWord) {
-                let allCommands = [];
+            // ---- Полный список команд в зависимости от статуса ----
+            function getAllCommands() {
                 if (!authenticated) {
-                    allCommands = ['вход', 'регистрация', 'загрузить картинку', 'прочитать картинку', 'онлайн'];
+                    return ['вход', 'регистрация', 'загрузить картинку', 'прочитать картинку', 'онлайн'];
                 } else {
-                    allCommands = [
+                    return [
                         'написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё',
                         'помощь', 'выход', 'канал', 'автопрочтение', 'загрузить картинку', 'прочитать картинку',
                         'открепить', 'онлайн', 'аватар',
                         'канал создать', 'канал подписаться', 'канал отписаться', 'канал написать', 'канал прочитать', 'канал удалить'
                     ];
                 }
-                return allCommands.filter(cmd => cmd.startsWith(prefix));
             }
 
+            // ---- Автодополнение с категориями ----
             function showAutocomplete(completions) {
                 if (!completions || completions.length === 0) {
                     hideAutocomplete();
                     return;
                 }
-                // Группируем по категориям
+                // группируем по категориям
                 let categorized = {};
                 for (let cmd of completions) {
                     let found = false;
@@ -846,19 +845,18 @@
 
             function completeWith(completion) {
                 if (!completion) return;
-                const input = commandInput;
-                const cursorPos = input.selectionStart;
-                const beforeCursor = input.value.slice(0, cursorPos);
-                const afterCursor = input.value.slice(cursorPos);
-                const lastSpaceBefore = beforeCursor.lastIndexOf(' ');
-                const startOfWord = lastSpaceBefore === -1 ? 0 : lastSpaceBefore + 1;
-                const newBefore = beforeCursor.slice(0, startOfWord) + completion;
-                const newValue = newBefore + afterCursor;
-                input.value = newValue;
-                input.setSelectionRange(newBefore.length, newBefore.length);
+                commandInput.value = completion;          // заменяем всё поле
+                commandInput.setSelectionRange(completion.length, completion.length);
                 hideAutocomplete();
             }
 
+            // Получение списка команд, начинающихся с префикса (для Tab)
+            function getCompletionList(prefix, prevWord) {
+                const all = getAllCommands();
+                return all.filter(cmd => cmd.startsWith(prefix));
+            }
+
+            // ---- Обработка Tab ----
             function handleTab() {
                 if (mode !== 'normal') {
                     hideAutocomplete();
@@ -871,48 +869,15 @@
                 const lastSpaceBefore = beforeCursor.lastIndexOf(' ');
                 const startOfWord = lastSpaceBefore === -1 ? 0 : lastSpaceBefore + 1;
                 const wordPrefix = beforeCursor.slice(startOfWord);
-                const beforeCurrent = beforeCursor.slice(0, startOfWord).trim();
-                const prevWord = beforeCurrent.split(' ').pop() || '';
-                const completions = getCompletionList(wordPrefix, prevWord);
-
+                const completions = getCompletionList(wordPrefix, '');
                 if (completions.length === 0) {
                     hideAutocomplete();
                     return;
                 }
-
-                if (!autocompleteMenu.classList.contains('visible')) {
-                    showAutocomplete(completions);
-                } else {
-                    if (completions.length > 0) {
-                        if (selectedCompletionIndex < completions.length - 1) {
-                            selectedCompletionIndex++;
-                        } else {
-                            selectedCompletionIndex = 0;
-                        }
-                        // Перерисовываем снова, но с новым индексом
-                        let categorized = {};
-                        for (let cmd of completions) {
-                            let found = false;
-                            for (let [cat, cmds] of Object.entries(commandCategories)) {
-                                if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && cmd !== 'загрузить картинку' && cmd !== 'прочитать картинку' && cmd !== 'открепить' && cmd !== 'аватар')) {
-                                    if (!categorized[cat]) categorized[cat] = [];
-                                    categorized[cat].push(cmd);
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found) {
-                                if (!categorized['Прочее']) categorized['Прочее'] = [];
-                                categorized['Прочее'].push(cmd);
-                            }
-                        }
-                        renderAutocomplete(categorized);
-                    } else {
-                        hideAutocomplete();
-                    }
-                }
+                showAutocomplete(completions);
             }
 
+            // ---- Выполнение команды ----
             function executeCommand(cmd) {
                 const trimmed = cmd.trim();
                 if (trimmed === '' && mode === 'normal') return;
@@ -1138,6 +1103,23 @@
                 render();
             }
 
+            // ---- Обработчики событий ----
+            commandInput.addEventListener('input', () => {
+                if (mode !== 'normal') return;
+                const val = commandInput.value.trim().toLowerCase();
+                if (val.length < 2) {
+                    hideAutocomplete();
+                    return;
+                }
+                const all = getAllCommands();
+                const completions = all.filter(cmd => cmd.includes(val)).slice(0, 20);
+                if (completions.length > 0) {
+                    showAutocomplete(completions);
+                } else {
+                    hideAutocomplete();
+                }
+            });
+
             commandInput.addEventListener('keydown', (e) => {
                 const key = e.key;
                 const input = commandInput;
@@ -1150,10 +1132,9 @@
                         } else {
                             selectedCompletionIndex = currentCompletions.length - 1;
                         }
-                        // Перерисовываем с новым индексом (упрощённо — просто вызовем показ заново)
-                        const completions = getCompletionList('', '');
+                        // перестроим меню с текущими completion'ами (они уже в currentCompletions)
                         let categorized = {};
-                        for (let cmd of completions) {
+                        for (let cmd of currentCompletions) {
                             let found = false;
                             for (let [cat, cmds] of Object.entries(commandCategories)) {
                                 if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && cmd !== 'загрузить картинку' && cmd !== 'прочитать картинку' && cmd !== 'открепить' && cmd !== 'аватар')) {
@@ -1178,9 +1159,8 @@
                         } else {
                             selectedCompletionIndex = 0;
                         }
-                        const completions = getCompletionList('', '');
                         let categorized = {};
-                        for (let cmd of completions) {
+                        for (let cmd of currentCompletions) {
                             let found = false;
                             for (let [cat, cmds] of Object.entries(commandCategories)) {
                                 if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && cmd !== 'загрузить картинку' && cmd !== 'прочитать картинку' && cmd !== 'открепить' && cmd !== 'аватар')) {
@@ -1212,7 +1192,7 @@
                         hideAutocomplete();
                         return;
                     }
-                    hideAutocomplete();
+                    // При любом другом нажатии меню скрывается (оно перестроится по input)
                 }
 
                 if (e.ctrlKey && key === 'v') {
