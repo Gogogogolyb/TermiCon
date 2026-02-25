@@ -16,7 +16,6 @@
             height: 100vh;
             display: flex;
             font-family: 'Courier New', Courier, monospace;
-            /* Убраны внешние отступы — терминал занимает всё окно */
             padding: 0;
             margin: 0;
         }
@@ -125,7 +124,7 @@
             padding-bottom: 2px;
         }
 
-        /* Единый стиль строки ввода для всех устройств */
+        /* Единый стиль строки ввода */
         .input-line {
             display: flex;
             align-items: center;
@@ -164,6 +163,22 @@
             font-style: italic;
             opacity: 0.8;
         }
+
+        /* Ссылки на изображения */
+        .image-link {
+            color: #ffaa66;
+            text-decoration: underline;
+            cursor: pointer;
+        }
+        .image-link:hover {
+            color: #ffcc99;
+        }
+
+        /* Скрытый input для загрузки файлов */
+        #fileUpload {
+            display: none;
+        }
+
         a {
             color: #87cefa;
             text-decoration: underline;
@@ -204,6 +219,8 @@
             <span class="prompt" id="prompt"></span>
             <input type="text" class="terminal-input" id="commandInput" autofocus placeholder="Введите команду">
         </div>
+        <!-- Скрытый input для загрузки изображений -->
+        <input type="file" id="fileUpload" accept="image/png, image/jpeg, image/gif, image/bmp, image/webp">
     </div>
 
     <script>
@@ -215,6 +232,7 @@
             const outputArea = document.getElementById('outputArea');
             const promptSpan = document.getElementById('prompt');
             const commandInput = document.getElementById('commandInput');
+            const fileInput = document.getElementById('fileUpload');
 
             // Состояние приложения
             let history = [];                 // массив строк для вывода
@@ -229,6 +247,7 @@
             let tempChannelName = '';
             let lastUnreadHash = null;
             let autoReadEnabled = false;
+            let pendingImageId = null;          // ID последней загруженной картинки для прикрепления
 
             // WebSocket
             let socket = null;
@@ -237,9 +256,12 @@
             const initialLines = [
                 'Добро пожаловать в терминал.',
                 'Доступные команды:',
-                '  вход         - выполнить вход',
-                '  регистрация  - создать новый аккаунт',
-                '  выход        - выйти из аккаунта',
+                '  вход                - выполнить вход',
+                '  регистрация         - создать новый аккаунт',
+                '  выход               - выйти из аккаунта',
+                '  загрузить картинку  - открыть проводник для выбора изображения',
+                '  прочитать картинку [id] - открыть изображение',
+                '  открепить           - открепить ранее загруженную картинку',
                 '----------------------------------------------',
                 ''
             ];
@@ -253,6 +275,14 @@
             function linkify(text) {
                 const urlPattern = /(https?:\/\/[^\s]+)/g;
                 return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
+            }
+
+            function formatMessageWithImage(line, imageId) {
+                // Добавляет ссылку на изображение к строке сообщения
+                if (imageId) {
+                    return line + ` <span class="image-link" onclick="window.open('/image/${imageId}')">[Изображение ID: ${imageId}]</span>`;
+                }
+                return line;
             }
 
             function updatePrompt() {
@@ -270,10 +300,21 @@
             function render() {
                 // Отрисовка истории
                 let html = '';
-                for (let line of history) {
-                    let escaped = escapeHTML(line);
-                    let linked = linkify(escaped);
-                    html += `<div class="output-line">${linked}</div>`;
+                for (let lineObj of history) {
+                    // Если строка — объект с полями text и imageId, форматируем специально
+                    if (typeof lineObj === 'object' && lineObj.text !== undefined) {
+                        let escaped = escapeHTML(lineObj.text);
+                        let linked = linkify(escaped);
+                        if (lineObj.imageId) {
+                            linked += ` <span class="image-link" onclick="window.open('/image/${lineObj.imageId}')">[Изображение ID: ${lineObj.imageId}]</span>`;
+                        }
+                        html += `<div class="output-line">${linked}</div>`;
+                    } else {
+                        // Обычная строка
+                        let escaped = escapeHTML(lineObj);
+                        let linked = linkify(escaped);
+                        html += `<div class="output-line">${linked}</div>`;
+                    }
                 }
                 outputArea.innerHTML = html;
                 outputArea.scrollTop = outputArea.scrollHeight;
@@ -282,8 +323,13 @@
                 updatePrompt();
             }
 
-            function appendHistory(text) {
-                history.push(text);
+            // Перегружаем appendHistory для поддержки объектов
+            function appendHistory(text, imageId = null) {
+                if (imageId) {
+                    history.push({ text, imageId });
+                } else {
+                    history.push(text);
+                }
                 render();
             }
 
@@ -447,7 +493,8 @@
                                 appendHistory('Все непрочитанные личные сообщения:');
                             }
                             messages.forEach(msg => {
-                                appendHistory(`[${msg.timestamp}] ${msg.from_login} (${msg.from_id}): ${msg.content}`);
+                                let line = `[${msg.timestamp}] ${msg.from_login} (${msg.from_id}): ${msg.content}`;
+                                appendHistory(line, msg.image_id);
                             });
                         } else {
                             appendHistory('Нет личных сообщений для отображения.');
@@ -470,6 +517,8 @@
                     });
                     const data = await resp.json();
                     if (resp.ok && !data.error) {
+                        // data.result — массив строк, но они не содержат image_id отдельно, поэтому выводим как есть
+                        // В идеале надо переделать сервер, чтобы возвращал объекты, но пока так
                         data.result.forEach(line => appendHistory(line));
                         await fetchUnreadSummary(true);
                     } else {
@@ -534,12 +583,12 @@
                 }
             }
 
-            async function channelSend(name, message) {
+            async function channelSend(name, message, imageId = null) {
                 try {
                     const resp = await fetch(`${API_BASE}/channel/send`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ user_id: currentUserId, channel_name: name, content: message })
+                        body: JSON.stringify({ user_id: currentUserId, channel_name: name, content: message, image_id: imageId })
                     });
                     const data = await resp.json();
                     if (resp.ok && !data.error) {
@@ -589,6 +638,7 @@
                     currentUserId = user.id;
                     currentLogin = user.login;
                     autoReadEnabled = false;
+                    pendingImageId = null;
                     appendHistory(`Добро пожаловать, ${user.login}!`);
                     await fetchUnreadSummary(false);
                     connectWebSocket();
@@ -637,15 +687,40 @@
                 }
             }
 
+            // --- Загрузка изображения ---
+            function uploadImage(file) {
+                const formData = new FormData();
+                formData.append('user_id', currentUserId);
+                formData.append('image', file);
+
+                fetch(`${API_BASE}/upload_image`, {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(resp => resp.json())
+                .then(data => {
+                    if (data.error) {
+                        appendHistory(`Ошибка загрузки: ${data.error}`);
+                    } else {
+                        const imageId = data.result.image_id;
+                        pendingImageId = imageId;
+                        appendHistory(`✅ Изображение загружено. ID: ${imageId}. Оно будет прикреплено к следующему отправленному сообщению.`);
+                    }
+                })
+                .catch(err => {
+                    appendHistory(`Ошибка соединения при загрузке: ${err.message}`);
+                });
+            }
+
             // --- Обработка команд ---
             function getCompletionList(prefix, prevWord) {
                 if (!authenticated) {
-                    return ['вход', 'регистрация'].filter(cmd => cmd.startsWith(prefix));
+                    return ['вход', 'регистрация', 'загрузить картинку', 'прочитать картинку'].filter(cmd => cmd.startsWith(prefix));
                 } else {
                     if (prevWord === 'канал') {
                         return ['создать', 'подписаться', 'отписаться', 'написать', 'прочитать', 'удалить'].filter(cmd => cmd.startsWith(prefix));
                     } else {
-                        return ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'канал', 'автопрочтение'].filter(cmd => cmd.startsWith(prefix));
+                        return ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'канал', 'автопрочтение', 'загрузить картинку', 'прочитать картинку', 'открепить'].filter(cmd => cmd.startsWith(prefix));
                     }
                 }
             }
@@ -701,8 +776,13 @@
                     } else if (command === 'регистрация' || command === 'register') {
                         mode = 'awaiting_register_login';
                         appendHistory('Придумайте логин:');
+                    } else if (command === 'загрузить' && args[0] === 'картинку') {
+                        fileInput.click();  // открываем проводник
+                    } else if (command === 'прочитать' && args[0] === 'картинку' && args[1]) {
+                        const imageId = args[1];
+                        window.open(`/image/${imageId}`, '_blank');
                     } else {
-                        appendHistory('Неизвестная команда. Доступные: вход, регистрация');
+                        appendHistory('Неизвестная команда. Доступные: вход, регистрация, загрузить картинку, прочитать картинку [id]');
                     }
                     commandInput.value = '';
                     render();
@@ -749,15 +829,17 @@
                             if (closeQuoteIndex === -1) { appendHistory('Ошибка: не найдена закрывающая кавычка.'); return; }
                             chName = trimmedArgs.substring(1, closeQuoteIndex).trim();
                             message = trimmedArgs.substring(closeQuoteIndex + 1).trim();
-                            if (!chName || !message) { appendHistory('Ошибка: название и сообщение не могут быть пустыми.'); return; }
                         } else {
                             const spaceIndex = trimmedArgs.indexOf(' ');
                             if (spaceIndex === -1) { appendHistory('Укажите название и сообщение: канал написать [название] [текст]'); return; }
                             chName = trimmedArgs.substring(0, spaceIndex).trim();
                             message = trimmedArgs.substring(spaceIndex + 1).trim();
-                            if (!chName || !message) { appendHistory('Укажите название и сообщение.'); return; }
                         }
-                        channelSend(chName, message);
+                        // Если есть pendingImageId, добавляем его
+                        channelSend(chName, message, pendingImageId);
+                        if (pendingImageId) {
+                            pendingImageId = null; // сбрасываем после отправки
+                        }
                     } else if (sub === 'прочитать') {
                         if (!subArgs) { appendHistory('Укажите название канала.'); return; }
                         channelRead(subArgs);
@@ -775,7 +857,11 @@
                 } else if (command === 'написать' && args.length >= 2) {
                     const toId = args[0];
                     const message = args.slice(1).join(' ');
-                    apiCommand('написать', { to_id: toId, message: message });
+                    // Отправляем с прикреплённым изображением, если есть
+                    apiCommand('написать', { to_id: toId, message: message, image_id: pendingImageId });
+                    if (pendingImageId) {
+                        pendingImageId = null; // сбрасываем
+                    }
                 } else if (command === 'профиль' && args.length >= 1) {
                     apiCommand('профиль', { profile_id: args[0] });
                 } else if (command === 'пинг' || command === 'ping') {
@@ -784,7 +870,7 @@
                     appendHistory(`Ваш ID: ${currentUserId}`);
                 } else if (command === 'непрочитанные' || command === 'список') {
                     fetchUnreadSummary(false);
-                } else if (command === 'прочитать' && args.length >= 1 && args[0] !== 'всё') {
+                } else if (command === 'прочитать' && args.length >= 1 && args[0] !== 'всё' && args[0] !== 'картинку') {
                     readMessages(args[0]);
                 } else if (command === 'прочитать всё' || (command === 'прочитать' && args[0] === 'всё')) {
                     readMessages();
@@ -796,9 +882,22 @@
                     currentLogin = null;
                     lastUnreadHash = null;
                     autoReadEnabled = false;
+                    pendingImageId = null;
                     disconnectWebSocket();
                     appendHistory('Вы вышли из аккаунта.');
-                    appendHistory('Доступные команды: вход, регистрация');
+                    appendHistory('Доступные команды: вход, регистрация, загрузить картинку, прочитать картинку');
+                } else if (command === 'загрузить' && args[0] === 'картинку') {
+                    fileInput.click();
+                } else if (command === 'прочитать' && args[0] === 'картинку' && args[1]) {
+                    const imageId = args[1];
+                    window.open(`/image/${imageId}`, '_blank');
+                } else if (command === 'открепить') {
+                    if (pendingImageId) {
+                        pendingImageId = null;
+                        appendHistory('Изображение откреплено.');
+                    } else {
+                        appendHistory('Нет прикреплённого изображения.');
+                    }
                 } else {
                     appendHistory(`Неизвестная команда: ${command}. Введите "помощь" для списка команд.`);
                 }
@@ -810,7 +909,7 @@
 
             function showHelp() {
                 appendHistory('Доступные команды:');
-                appendHistory('  написать [id] [сообщение]   - отправить личное сообщение');
+                appendHistory('  написать [id] [сообщение]   - отправить личное сообщение (автоматически прикрепляет загруженную картинку)');
                 appendHistory('  профиль [id]                - просмотр профиля');
                 appendHistory('  непрочитанные                - список контактов с непрочитанными');
                 appendHistory('  прочитать [id]               - прочитать личные сообщения от пользователя');
@@ -818,6 +917,9 @@
                 appendHistory('  пинг                         - проверка связи');
                 appendHistory('  мойид                        - показать свой ID');
                 appendHistory('  автопрочтение [вкл|выкл]     - включить/выключить авто-прочтение');
+                appendHistory('  загрузить картинку           - открыть проводник для выбора изображения');
+                appendHistory('  прочитать картинку [id]      - открыть изображение');
+                appendHistory('  открепить                    - открепить текущее изображение');
                 appendHistory('  помощь                       - эта справка');
                 appendHistory('  выход                        - выйти из аккаунта');
                 appendHistory('');
@@ -901,7 +1003,6 @@
                     if (historyIndex > 0) {
                         historyIndex--;
                         input.value = commandHistory[historyIndex] || '';
-                        // ставим курсор в конец
                         setTimeout(() => input.setSelectionRange(input.value.length, input.value.length), 0);
                     }
                     return;
@@ -918,8 +1019,19 @@
                     }
                     return;
                 }
+            });
 
-                // Остальные клавиши обрабатываются стандартно
+            // Обработчик выбора файла
+            fileInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    if (!authenticated) {
+                        appendHistory('Ошибка: необходимо войти в систему для загрузки изображений.');
+                        return;
+                    }
+                    uploadImage(file);
+                }
+                fileInput.value = ''; // сбрасываем, чтобы можно было загрузить тот же файл снова
             });
 
             // Фокус на поле ввода при клике на терминал
