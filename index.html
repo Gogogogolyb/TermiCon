@@ -532,12 +532,12 @@
                 const urlPattern = /(https?:\/\/[^\s]+)/g;
                 return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
             }
-
             function setTextColor(colorName) {
                 currentColor = colorName;
                 const cssColor = colorMap[colorName] || '#b0ffb0';
                 outputArea.style.color = cssColor;
                 commandInput.style.color = cssColor;
+            }
             }
 
             function updatePrompt() {
