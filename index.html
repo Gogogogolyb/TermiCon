@@ -122,7 +122,8 @@
             border-bottom: 1px dotted #1e2f3a;
             padding-bottom: 2px;
         }
-        /* Старый стиль для input-line (desktop) */
+
+        /* Единый стиль строки ввода для всех устройств */
         .input-line {
             display: flex;
             align-items: center;
@@ -131,7 +132,6 @@
             border-top: 1px solid #2a3a4a;
             box-shadow: 0 -5px 15px rgba(0, 255, 255, 0.1);
             font-family: 'Courier New', Courier, monospace;
-            white-space: nowrap;
         }
         .prompt {
             color: #6fcf97;
@@ -140,54 +140,7 @@
             text-shadow: 0 0 5px #1affaa;
             flex-shrink: 0;
         }
-        .input-text {
-            position: relative;
-            display: flex;
-            align-items: center;
-            font-family: inherit;
-            font-size: inherit;
-            line-height: 1.5;
-            color: #d0e0e0;
-            white-space: pre;
-            flex: 1;
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-        }
-        .input-part {
-            white-space: pre;
-        }
-        .cursor {
-            display: inline-block;
-            width: 0.6em;
-            height: 1.2em;
-            background-color: #8ae2b0;
-            margin: 0 1px;
-            animation: blink 1s step-end infinite;
-            vertical-align: middle;
-            box-shadow: 0 0 8px #6fcf97;
-        }
-        @keyframes blink {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0; }
-        }
-        /* Новый стиль для input (mobile) — терминальный */
-        .mobile-input-line {
-            display: flex;
-            align-items: center;
-            background: #0e1219;
-            padding: 10px 20px;
-            border-top: 1px solid #2a3a4a;
-            box-shadow: 0 -5px 15px rgba(0, 255, 255, 0.1);
-            font-family: 'Courier New', Courier, monospace;
-        }
-        .mobile-prompt {
-            color: #6fcf97;
-            margin-right: 12px;
-            font-weight: bold;
-            text-shadow: 0 0 5px #1affaa;
-            flex-shrink: 0;
-        }
-        .mobile-input {
+        .terminal-input {
             background: transparent;
             border: none;
             border-bottom: 1px solid #2a3a4a;
@@ -201,10 +154,10 @@
             padding: 4px 0;
             transition: border-color 0.2s;
         }
-        .mobile-input:focus {
+        .terminal-input:focus {
             border-bottom-color: #6fcf97;
         }
-        .mobile-input::placeholder {
+        .terminal-input::placeholder {
             color: #3a4a5a;
             font-style: italic;
             opacity: 0.8;
@@ -247,19 +200,10 @@
 <body>
     <div class="dos-terminal" id="terminalContainer">
         <div class="dos-screen" id="outputArea"></div>
-        <!-- Десктопный интерфейс -->
-        <div class="input-line" id="desktopInputLine" style="display: none;">
-            <span class="prompt" id="desktopPrompt"></span>
-            <span class="input-text" id="desktopInputText">
-                <span class="input-part" id="leftPart"></span>
-                <span class="cursor"></span>
-                <span class="input-part" id="rightPart"></span>
-            </span>
-        </div>
-        <!-- Мобильный интерфейс -->
-        <div class="mobile-input-line" id="mobileInputLine" style="display: none;">
-            <span class="mobile-prompt" id="mobilePrompt"></span>
-            <input type="text" class="mobile-input" id="mobileCommandInput" autofocus placeholder="Введите команду">
+        <!-- Единая строка ввода -->
+        <div class="input-line">
+            <span class="prompt" id="prompt"></span>
+            <input type="text" class="terminal-input" id="commandInput" autofocus placeholder="Введите команду">
         </div>
     </div>
 
@@ -267,27 +211,11 @@
         (function() {
             // --- Константы и состояние ---
             const API_BASE = '';  // пусто, если фронт и бэк на одном домене
-            const isMobile = /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 768;
-            console.log('TermiCon запущен, isMobile =', isMobile);
 
             // DOM-элементы
             const outputArea = document.getElementById('outputArea');
-            const desktopLine = document.getElementById('desktopInputLine');
-            const mobileLine = document.getElementById('mobileInputLine');
-            const desktopPrompt = document.getElementById('desktopPrompt');
-            const mobilePrompt = document.getElementById('mobilePrompt');
-            const leftPart = document.getElementById('leftPart');
-            const rightPart = document.getElementById('rightPart');
-            const mobileInput = document.getElementById('mobileCommandInput');
-
-            // Показываем нужный интерфейс
-            if (isMobile) {
-                desktopLine.style.display = 'none';
-                mobileLine.style.display = 'flex';
-            } else {
-                desktopLine.style.display = 'flex';
-                mobileLine.style.display = 'none';
-            }
+            const promptSpan = document.getElementById('prompt');
+            const commandInput = document.getElementById('commandInput');
 
             // Состояние приложения
             let history = [];                 // массив строк для вывода
@@ -302,10 +230,6 @@
             let tempChannelName = '';
             let lastUnreadHash = null;
             let autoReadEnabled = false;
-
-            // Для десктопного ввода
-            let currentInput = '';
-            let cursorPos = 0;
 
             // WebSocket
             let socket = null;
@@ -341,11 +265,7 @@
                 else if (mode === 'awaiting_register_login') promptStr = 'Придумайте логин:';
                 else if (mode === 'awaiting_register_password') promptStr = 'Придумайте пароль:';
                 else if (mode === 'awaiting_channel_delete_confirmation') promptStr = 'Подтверждение:';
-                if (isMobile) {
-                    mobilePrompt.textContent = promptStr;
-                } else {
-                    desktopPrompt.textContent = promptStr;
-                }
+                promptSpan.textContent = promptStr;
             }
 
             function render() {
@@ -359,17 +279,7 @@
                 outputArea.innerHTML = html;
                 outputArea.scrollTop = outputArea.scrollHeight;
 
-                // Для десктопа обновляем содержимое строки ввода
-                if (!isMobile) {
-                    let displayText = currentInput;
-                    if (mode === 'awaiting_password' || mode === 'awaiting_register_password') {
-                        displayText = '*'.repeat(currentInput.length);
-                    }
-                    const safePos = Math.min(cursorPos, displayText.length);
-                    leftPart.textContent = displayText.slice(0, safePos);
-                    rightPart.textContent = displayText.slice(safePos);
-                }
-                // Всегда обновляем промпт (для обоих интерфейсов)
+                // Обновляем промпт
                 updatePrompt();
             }
 
@@ -383,12 +293,7 @@
                 tempLogin = '';
                 tempPassword = '';
                 tempChannelName = '';
-                if (isMobile) {
-                    mobileInput.value = '';
-                } else {
-                    currentInput = '';
-                    cursorPos = 0;
-                }
+                commandInput.value = '';
                 render();
             }
 
@@ -800,12 +705,7 @@
                     } else {
                         appendHistory('Неизвестная команда. Доступные: вход, регистрация');
                     }
-                    if (isMobile) {
-                        mobileInput.value = '';
-                    } else {
-                        currentInput = '';
-                        cursorPos = 0;
-                    }
+                    commandInput.value = '';
                     render();
                     return;
                 }
@@ -867,12 +767,7 @@
                         tempChannelName = subArgs;
                         mode = 'awaiting_channel_delete_confirmation';
                         appendHistory(`Вы уверены, что хотите удалить канал "${tempChannelName}"? (да/нет)`);
-                        if (isMobile) {
-                            mobileInput.value = '';
-                        } else {
-                            currentInput = '';
-                            cursorPos = 0;
-                        }
+                        commandInput.value = '';
                         render();
                         return;
                     } else {
@@ -910,12 +805,7 @@
                 }
 
                 // Очищаем поле ввода
-                if (isMobile) {
-                    mobileInput.value = '';
-                } else {
-                    currentInput = '';
-                    cursorPos = 0;
-                }
+                commandInput.value = '';
                 render();
             }
 
@@ -965,181 +855,76 @@
                     }
                     resetMode();
                 }
-                if (isMobile) {
-                    mobileInput.value = '';
-                } else {
-                    currentInput = '';
-                    cursorPos = 0;
-                }
+                commandInput.value = '';
                 render();
             }
 
-            // --- Обработчики событий для десктопа ---
-            if (!isMobile) {
-                const container = document.getElementById('terminalContainer');
-                const output = outputArea;
+            // --- Обработчик событий ввода ---
+            commandInput.addEventListener('keydown', (e) => {
+                const key = e.key;
+                const input = commandInput;
 
-                output.addEventListener('keydown', (e) => {
-                    const key = e.key;
+                // Ctrl+V (вставка)
+                if (e.ctrlKey && key === 'v') {
+                    e.preventDefault();
+                    navigator.clipboard.readText().then(text => {
+                        const start = input.selectionStart;
+                        const end = input.selectionEnd;
+                        const newValue = input.value.substring(0, start) + text + input.value.substring(end);
+                        input.value = newValue;
+                        input.setSelectionRange(start + text.length, start + text.length);
+                    }).catch(err => {
+                        appendHistory('Не удалось вставить текст: ' + err);
+                    });
+                    return;
+                }
 
-                    // Ctrl+V
-                    if (e.ctrlKey && key === 'v') {
-                        e.preventDefault();
-                        navigator.clipboard.readText().then(text => {
-                            const before = currentInput.slice(0, cursorPos);
-                            const after = currentInput.slice(cursorPos);
-                            currentInput = before + text + after;
-                            cursorPos += text.length;
-                            render();
-                        }).catch(err => {
-                            appendHistory('Не удалось вставить текст: ' + err);
-                        });
-                        return;
+                // Enter
+                if (key === 'Enter') {
+                    e.preventDefault();
+                    executeCommand(input.value);
+                    return;
+                }
+
+                // Tab
+                if (key === 'Tab') {
+                    e.preventDefault();
+                    handleTab(input.value, input.selectionStart, (newVal, newPos) => {
+                        input.value = newVal;
+                        input.setSelectionRange(newPos, newPos);
+                    });
+                    return;
+                }
+
+                // Стрелки вверх/вниз для истории команд
+                if (key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (historyIndex > 0) {
+                        historyIndex--;
+                        input.value = commandHistory[historyIndex] || '';
+                        // ставим курсор в конец
+                        setTimeout(() => input.setSelectionRange(input.value.length, input.value.length), 0);
                     }
-
-                    // Enter
-                    if (key === 'Enter') {
-                        e.preventDefault();
-                        executeCommand(currentInput);
-                        return;
+                    return;
+                }
+                if (key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (historyIndex < commandHistory.length - 1) {
+                        historyIndex++;
+                        input.value = commandHistory[historyIndex] || '';
+                        setTimeout(() => input.setSelectionRange(input.value.length, input.value.length), 0);
+                    } else {
+                        historyIndex = commandHistory.length;
+                        input.value = '';
                     }
+                    return;
+                }
 
-                    // Tab
-                    if (key === 'Tab') {
-                        e.preventDefault();
-                        handleTab(currentInput, cursorPos, (newVal, newPos) => {
-                            currentInput = newVal;
-                            cursorPos = newPos;
-                            render();
-                        });
-                        return;
-                    }
+                // Остальные клавиши обрабатываются стандартно
+            });
 
-                    // Стрелки
-                    if (key === 'ArrowUp') {
-                        e.preventDefault();
-                        if (historyIndex > 0) {
-                            historyIndex--;
-                            currentInput = commandHistory[historyIndex] || '';
-                            cursorPos = currentInput.length;
-                            render();
-                        }
-                        return;
-                    }
-                    if (key === 'ArrowDown') {
-                        e.preventDefault();
-                        if (historyIndex < commandHistory.length - 1) {
-                            historyIndex++;
-                            currentInput = commandHistory[historyIndex] || '';
-                            cursorPos = currentInput.length;
-                            render();
-                        } else {
-                            historyIndex = commandHistory.length;
-                            currentInput = '';
-                            cursorPos = 0;
-                            render();
-                        }
-                        return;
-                    }
-                    if (key === 'ArrowLeft') {
-                        e.preventDefault();
-                        if (cursorPos > 0) { cursorPos--; render(); }
-                        return;
-                    }
-                    if (key === 'ArrowRight') {
-                        e.preventDefault();
-                        if (cursorPos < currentInput.length) { cursorPos++; render(); }
-                        return;
-                    }
-
-                    // Backspace
-                    if (key === 'Backspace') {
-                        e.preventDefault();
-                        if (cursorPos > 0) {
-                            const before = currentInput.slice(0, cursorPos - 1);
-                            const after = currentInput.slice(cursorPos);
-                            currentInput = before + after;
-                            cursorPos--;
-                            render();
-                        }
-                        return;
-                    }
-
-                    // Delete
-                    if (key === 'Delete') {
-                        e.preventDefault();
-                        if (cursorPos < currentInput.length) {
-                            const before = currentInput.slice(0, cursorPos);
-                            const after = currentInput.slice(cursorPos + 1);
-                            currentInput = before + after;
-                            render();
-                        }
-                        return;
-                    }
-
-                    // Печатные символы
-                    if (key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                        e.preventDefault();
-                        const before = currentInput.slice(0, cursorPos);
-                        const after = currentInput.slice(cursorPos);
-                        currentInput = before + key + after;
-                        cursorPos++;
-                        render();
-                        return;
-                    }
-                });
-
-                container.addEventListener('click', () => output.focus());
-                output.focus();
-            }
-
-            // --- Обработчики событий для мобильного интерфейса ---
-            if (isMobile) {
-                mobileInput.addEventListener('keydown', (e) => {
-                    const key = e.key;
-
-                    if (key === 'Enter') {
-                        e.preventDefault();
-                        const cmd = mobileInput.value;
-                        executeCommand(cmd);
-                        mobileInput.value = '';
-                        return;
-                    }
-
-                    if (key === 'Tab') {
-                        e.preventDefault();
-                        handleTab(mobileInput.value, mobileInput.selectionStart, (newVal, newPos) => {
-                            mobileInput.value = newVal;
-                            mobileInput.setSelectionRange(newPos, newPos);
-                        });
-                        return;
-                    }
-
-                    if (key === 'ArrowUp') {
-                        e.preventDefault();
-                        if (historyIndex > 0) {
-                            historyIndex--;
-                            mobileInput.value = commandHistory[historyIndex] || '';
-                        }
-                        return;
-                    }
-
-                    if (key === 'ArrowDown') {
-                        e.preventDefault();
-                        if (historyIndex < commandHistory.length - 1) {
-                            historyIndex++;
-                            mobileInput.value = commandHistory[historyIndex] || '';
-                        } else {
-                            historyIndex = commandHistory.length;
-                            mobileInput.value = '';
-                        }
-                        return;
-                    }
-                });
-
-                document.getElementById('terminalContainer').addEventListener('click', () => mobileInput.focus());
-                mobileInput.focus();
-            }
+            // Фокус на поле ввода при клике на терминал
+            document.getElementById('terminalContainer').addEventListener('click', () => commandInput.focus());
 
             // Стартовый рендер
             render();
