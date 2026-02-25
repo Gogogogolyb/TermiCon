@@ -1,0 +1,1048 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Терминал (русские команды) + Каналы + Автопрочтение</title>
+    <style>
+        /* Стили без изменений (те же, что и в предыдущей версии) */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: radial-gradient(circle at 20% 20%, #1a1f2e, #0a0c12);
+            height: 100vh;
+            display: flex;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 16px;
+        }
+
+        .dos-terminal {
+            width: 100%;
+            height: 100%;
+            background: rgba(8, 10, 15, 0.95);
+            border: 1px solid #2e3a4a;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px #2a3a4a inset;
+            backdrop-filter: blur(2px);
+            display: flex;
+            flex-direction: column;
+            outline: none;
+            overflow: hidden;
+        }
+
+        .dos-screen {
+            flex: 1;
+            background: transparent;
+            color: #d0e0e0;
+            padding: 16px 20px;
+            overflow-y: auto;
+            font-size: 16px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            outline: none;
+            user-select: text;
+            scrollbar-width: thin;
+            scrollbar-color: #4a5b6b #0f1217;
+            text-shadow: 0 0 3px #00a0a0;
+        }
+
+        .dos-screen::-webkit-scrollbar {
+            width: 8px;
+        }
+        .dos-screen::-webkit-scrollbar-track {
+            background: #0f1217;
+            border-radius: 4px;
+        }
+        .dos-screen::-webkit-scrollbar-thumb {
+            background: #4a5b6b;
+            border-radius: 4px;
+            border: 1px solid #1e2a33;
+        }
+        .dos-screen::-webkit-scrollbar-thumb:hover {
+            background: #5f7387;
+        }
+
+        .output-line {
+            margin-bottom: 4px;
+            color: #c0d0d0;
+            border-bottom: 1px dotted #1e2f3a;
+            padding-bottom: 2px;
+        }
+
+        .input-line {
+            display: flex;
+            align-items: center;
+            background: #0e1219;
+            padding: 10px 20px;
+            border-top: 1px solid #2a3a4a;
+            box-shadow: 0 -5px 15px rgba(0, 255, 255, 0.1);
+            font-family: 'Courier New', Courier, monospace;
+            white-space: nowrap;
+        }
+
+        .prompt {
+            color: #6fcf97;
+            margin-right: 12px;
+            font-weight: bold;
+            text-shadow: 0 0 5px #1affaa;
+            flex-shrink: 0;
+        }
+
+        .input-text {
+            position: relative;
+            display: flex;
+            align-items: center;
+            font-family: inherit;
+            font-size: inherit;
+            line-height: 1.5;
+            color: #d0e0e0;
+            white-space: pre;
+        }
+
+        .input-part {
+            white-space: pre;
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 0.6em;
+            height: 1.2em;
+            background-color: #8ae2b0;
+            margin: 0 1px;
+            animation: blink 1s step-end infinite;
+            vertical-align: middle;
+            box-shadow: 0 0 8px #6fcf97;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+
+        a {
+            color: #87cefa;
+            text-decoration: underline;
+            transition: color 0.2s;
+        }
+        a:hover {
+            color: #b0e0ff;
+            text-shadow: 0 0 5px #87cefa;
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 8px;
+            }
+            .dos-screen {
+                font-size: 14px;
+                padding: 12px 16px;
+            }
+            .cursor {
+                height: 1.2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dos-terminal" id="terminalContainer">
+        <div class="dos-screen" id="outputArea" tabindex="0">
+            <!-- Сюда будет рендериться содержимое -->
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            const API_BASE = '';  // относительный путь
+
+            // История вывода
+            let history = [];
+            // Текущий ввод и позиция курсора
+            let currentInput = '';
+            let cursorPos = 0;
+            // История команд (для стрелок вверх/вниз)
+            let commandHistory = [];
+            let historyIndex = 0;
+
+            // Аутентификация
+            let authenticated = false;
+            let currentUserId = null;
+            let currentLogin = null;
+
+            // Режимы ввода (нормальный, ожидание логина/пароля и т.д.)
+            let mode = 'normal';
+            let tempLogin = '';
+            let tempPassword = '';
+            let tempChannelName = ''; // для подтверждения удаления
+
+            // Хеш последнего состояния уведомлений (чтобы не спамить)
+            let lastUnreadHash = null;
+
+            // --- Новые переменные для авто-прочтения ---
+            let autoReadEnabled = false;       // включена ли функция
+            let hasReadManually = false;       // было ли ручное чтение после входа
+
+            // DOM-элементы
+            const outputArea = document.getElementById('outputArea');
+            const terminalContainer = document.getElementById('terminalContainer');
+
+            // Начальные строки
+            const initialLines = [
+                'Добро пожаловать в терминал.',
+                'Доступные команды:',
+                '  вход         - выполнить вход',
+                '  регистрация  - создать новый аккаунт',
+                '  выход        - выйти из аккаунта',
+                '----------------------------------------------',
+                ''
+            ];
+            history.push(...initialLines);
+
+            // --- Вспомогательные функции ---
+            function escapeHTML(str) {
+                return str.replace(/&/g, '&amp;')
+                          .replace(/</g, '&lt;')
+                          .replace(/>/g, '&gt;')
+                          .replace(/"/g, '&quot;')
+                          .replace(/'/g, '&#039;');
+            }
+
+            function linkify(text) {
+                const urlPattern = /(https?:\/\/[^\s]+)/g;
+                return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
+            }
+
+            // Возвращает строку для отображения (с учётом маскировки пароля)
+            function getDisplayInput() {
+                if (mode === 'awaiting_password' || mode === 'awaiting_register_password') {
+                    return '*'.repeat(currentInput.length);
+                }
+                return currentInput;
+            }
+
+            // Рендер экрана
+            function render() {
+                let html = '';
+                for (let line of history) {
+                    let escaped = escapeHTML(line);
+                    let linked = linkify(escaped);
+                    html += `<div class="output-line">${linked}</div>`;
+                }
+
+                // Определяем приглашение
+                let promptStr = '';
+                if (!authenticated && mode === 'normal') {
+                    promptStr = '>';
+                } else if (authenticated && mode === 'normal') {
+                    promptStr = `${currentLogin}@pc:~$`;
+                } else if (mode === 'awaiting_login') {
+                    promptStr = 'Логин:';
+                } else if (mode === 'awaiting_password') {
+                    promptStr = 'Пароль:';
+                } else if (mode === 'awaiting_register_login') {
+                    promptStr = 'Придумайте логин:';
+                } else if (mode === 'awaiting_register_password') {
+                    promptStr = 'Придумайте пароль:';
+                } else if (mode === 'awaiting_channel_delete_confirmation') {
+                    promptStr = 'Подтверждение:';
+                }
+
+                // Формируем строку ввода с курсором
+                const displayText = getDisplayInput();
+                const safePos = Math.min(cursorPos, displayText.length);
+                const leftPart = displayText.slice(0, safePos);
+                const rightPart = displayText.slice(safePos);
+
+                html += `<div class="input-line">`;
+                html += `<span class="prompt">${escapeHTML(promptStr)}</span>`;
+                html += `<span class="input-text">`;
+                html += `<span class="input-part">${escapeHTML(leftPart)}</span>`;
+                html += `<span class="cursor"></span>`;
+                html += `<span class="input-part">${escapeHTML(rightPart)}</span>`;
+                html += `</span>`;
+                html += `</div>`;
+
+                outputArea.innerHTML = html;
+                outputArea.scrollTop = outputArea.scrollHeight;
+            }
+
+            // Добавить строку в историю вывода
+            function appendHistory(text) {
+                history.push(text);
+                render();
+            }
+
+            // Сбросить режим ввода в нормальный
+            function resetMode() {
+                mode = 'normal';
+                tempLogin = '';
+                tempPassword = '';
+                tempChannelName = '';
+                currentInput = '';
+                cursorPos = 0;
+                render();
+            }
+
+            // --- API функции (с небольшими изменениями для отслеживания ручного чтения) ---
+            async function fetchUnreadSummary(silent = false) {
+                if (!authenticated || !currentUserId) return null;
+                try {
+                    const resp = await fetch(`${API_BASE}/unread_summary?user_id=${currentUserId}`);
+                    if (!resp.ok) {
+                        const text = await resp.text();
+                        appendHistory(`Ошибка HTTP ${resp.status}: ${text.substring(0, 100)}`);
+                        return null;
+                    }
+                    const data = await resp.json();
+                    const personal = data.summary || [];
+                    const channels = data.channels || [];
+                    const personalHash = JSON.stringify(personal);
+                    const channelsHash = JSON.stringify(channels);
+                    const currentHash = personalHash + '|' + channelsHash;
+
+                    // Если изменился хеш, обрабатываем новые уведомления
+                    if (currentHash !== lastUnreadHash) {
+                        lastUnreadHash = currentHash;
+
+                        // Если это не тихий режим (т.е. явный запрос пользователя), просто выводим уведомления
+                        if (!silent) {
+                            if (personal.length) {
+                                appendHistory('Непрочитанные личные сообщения:');
+                                personal.forEach(item => {
+                                    appendHistory(`  От ${item.from_login} (ID ${item.from_id}): ${item.count} сообщ.`);
+                                });
+                            }
+                            if (channels.length) {
+                                appendHistory('Непрочитанные сообщения в каналах:');
+                                channels.forEach(ch => {
+                                    appendHistory(`  Канал "${ch.channel_name}" (владелец ${ch.owner_login}): ${ch.unread_count} нов.`);
+                                });
+                            }
+                            if (!personal.length && !channels.length && lastUnreadHash !== null) {
+                                appendHistory('Все сообщения прочитаны.');
+                            }
+                        } else {
+                            // Тихий режим (polling) – выводим только краткие уведомления
+                            if (personal.length) {
+                                if (personal.length === 1) {
+                                    const item = personal[0];
+                                    appendHistory(`📩 Личное сообщение от ${item.from_login} (ID ${item.from_id})`);
+                                } else {
+                                    appendHistory(`📩 Новые личные сообщения от ${personal.length} пользователей`);
+                                }
+                            }
+                            if (channels.length) {
+                                channels.forEach(ch => {
+                                    appendHistory(`📢 Канал "${ch.channel_name}": ${ch.unread_count} нов. сообщ.`);
+                                });
+                            }
+
+                            // --- Автоматическое прочтение ---
+                            if (autoReadEnabled && hasReadManually && (personal.length > 0 || channels.length > 0)) {
+                                await autoReadAll(personal, channels);
+                            }
+                        }
+                    }
+                    return { personal, channels };
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                    return null;
+                }
+            }
+
+            // Новая функция: автоматически прочитать всё
+            async function autoReadAll(personalList, channelsList) {
+                let personalCount = 0;
+                let channelsCount = 0;
+
+                // Читаем все личные сообщения
+                if (personalList.length > 0) {
+                    try {
+                        const resp = await fetch(`${API_BASE}/read_messages`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ user_id: currentUserId })
+                        });
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            personalCount = data.messages ? data.messages.length : 0;
+                        }
+                    } catch (e) {
+                        // игнорируем ошибки при авто-чтении
+                    }
+                }
+
+                // Читаем сообщения из каждого канала с непрочитанными
+                for (const ch of channelsList) {
+                    try {
+                        const resp = await fetch(`${API_BASE}/channel/read`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ user_id: currentUserId, channel_name: ch.channel_name })
+                        });
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            // количество прочитанных можно оценить по ch.unread_count, но для точности вычтем
+                            channelsCount += ch.unread_count;
+                        }
+                    } catch (e) {}
+                }
+
+                if (personalCount > 0 || channelsCount > 0) {
+                    appendHistory(`📖 Автоматически прочитано: личных: ${personalCount}, каналов: ${channelsCount}`);
+                }
+
+                // Обновляем хеш, чтобы не сработало повторно в том же цикле
+                // (fetchUnreadSummary уже обновил lastUnreadHash до вызова autoReadAll)
+            }
+
+            // Личные сообщения (ручное чтение)
+            async function readMessages(fromId = null) {
+                if (!authenticated || !currentUserId) return;
+                try {
+                    const resp = await fetch(`${API_BASE}/read_messages`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            user_id: currentUserId,
+                            from_id: fromId
+                        })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        if (data.messages && data.messages.length) {
+                            if (fromId) {
+                                appendHistory(`Сообщения от пользователя ID ${fromId}:`);
+                            } else {
+                                appendHistory('Все непрочитанные личные сообщения:');
+                            }
+                            data.messages.forEach(msg => {
+                                appendHistory(`[${msg.timestamp}] ${msg.from_login} (${msg.from_id}): ${msg.content}`);
+                            });
+                        } else {
+                            appendHistory('Нет личных сообщений для отображения.');
+                        }
+                        // Помечаем, что было ручное чтение
+                        hasReadManually = true;
+                        await fetchUnreadSummary(true);
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            // Каналы (ручное чтение)
+            async function channelRead(name) {
+                try {
+                    const resp = await fetch(`${API_BASE}/channel/read`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, channel_name: name })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        data.result.forEach(line => appendHistory(line));
+                        // Помечаем, что было ручное чтение
+                        hasReadManually = true;
+                        await fetchUnreadSummary(true);
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            // Остальные API-функции (без изменений, кроме добавления hasReadManually в нужных местах)
+            async function channelCreate(name) {
+                try {
+                    const resp = await fetch(`${API_BASE}/channel/create`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, name })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        data.result.forEach(line => appendHistory(line));
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            async function channelSubscribe(name) {
+                try {
+                    const resp = await fetch(`${API_BASE}/channel/subscribe`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, channel_name: name })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        data.result.forEach(line => appendHistory(line));
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            async function channelUnsubscribe(name) {
+                try {
+                    const resp = await fetch(`${API_BASE}/channel/unsubscribe`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, channel_name: name })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        data.result.forEach(line => appendHistory(line));
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            async function channelSend(name, message) {
+                try {
+                    const resp = await fetch(`${API_BASE}/channel/send`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, channel_name: name, content: message })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        data.result.forEach(line => appendHistory(line));
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            async function channelDelete(name) {
+                try {
+                    const resp = await fetch(`${API_BASE}/channel/delete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, channel_name: name })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        data.result.forEach(line => appendHistory(line));
+                        await fetchUnreadSummary(true);
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            // --- Функция автодополнения (без изменений, но добавим новую команду) ---
+            function getCompletionList(prefix, prevWord) {
+                if (!authenticated) {
+                    const cmds = ['вход', 'регистрация'];
+                    return cmds.filter(cmd => cmd.startsWith(prefix));
+                } else {
+                    if (prevWord === 'канал') {
+                        const subcmds = ['создать', 'подписаться', 'отписаться', 'написать', 'прочитать', 'удалить'];
+                        return subcmds.filter(cmd => cmd.startsWith(prefix));
+                    } else {
+                        const mainCmds = [
+                            'написать', 'профиль', 'пинг', 'мойид', 'непрочитанные',
+                            'прочитать', 'прочитать всё', 'помощь', 'выход', 'канал',
+                            'автопрочтение'   // новая команда
+                        ];
+                        return mainCmds.filter(cmd => cmd.startsWith(prefix));
+                    }
+                }
+            }
+
+            function handleTab(e) {
+                e.preventDefault();
+                if (mode !== 'normal') return;
+
+                const beforeCursor = currentInput.slice(0, cursorPos);
+                const afterCursor = currentInput.slice(cursorPos);
+
+                const lastSpaceBefore = beforeCursor.lastIndexOf(' ');
+                const startOfWord = lastSpaceBefore === -1 ? 0 : lastSpaceBefore + 1;
+                const wordPrefix = beforeCursor.slice(startOfWord);
+
+                const beforeCurrent = beforeCursor.slice(0, startOfWord).trim();
+                const prevWord = beforeCurrent.split(' ').pop() || '';
+
+                const completions = getCompletionList(wordPrefix, prevWord);
+
+                if (completions.length === 0) return;
+
+                if (completions.length === 1) {
+                    const completion = completions[0];
+                    const newBefore = beforeCursor.slice(0, startOfWord) + completion;
+                    currentInput = newBefore + afterCursor;
+                    cursorPos = newBefore.length;
+                    render();
+                } else {
+                    appendHistory('Возможные варианты: ' + completions.join(', '));
+                }
+            }
+
+            // --- Команды ---
+            async function executeCommand(cmd) {
+                const trimmed = cmd.trim();
+                if (trimmed === '' && mode === 'normal') return;
+
+                if (mode !== 'normal') {
+                    handleInputInMode(trimmed);
+                    return;
+                }
+
+                commandHistory.push(trimmed);
+                historyIndex = commandHistory.length;
+
+                let promptChar = authenticated ? `${currentLogin}@pc:~$` : '>';
+                appendHistory(`${promptChar} ${trimmed}`);
+
+                const parts = trimmed.toLowerCase().split(' ');
+                const command = parts[0];
+                const args = parts.slice(1);
+
+                if (!authenticated) {
+                    if (command === 'вход' || command === 'login') {
+                        mode = 'awaiting_login';
+                        appendHistory('Введите логин:');
+                        currentInput = '';
+                        cursorPos = 0;
+                        render();
+                    } else if (command === 'регистрация' || command === 'register') {
+                        mode = 'awaiting_register_login';
+                        appendHistory('Придумайте логин:');
+                        currentInput = '';
+                        cursorPos = 0;
+                        render();
+                    } else {
+                        appendHistory('Неизвестная команда. Доступные: вход, регистрация');
+                    }
+                    return;
+                }
+
+                // --- Обработка новых команд ---
+                if (command === 'автопрочтение') {
+                    if (args.length === 0) {
+                        appendHistory(`Автоматическое прочтение: ${autoReadEnabled ? 'включено' : 'выключено'}`);
+                        return;
+                    }
+                    const arg = args[0];
+                    if (arg === 'вкл' || arg === 'on' || arg === '1' || arg === 'да') {
+                        autoReadEnabled = true;
+                        appendHistory('Автоматическое прочтение включено.');
+                    } else if (arg === 'выкл' || arg === 'off' || arg === '0' || arg === 'нет') {
+                        autoReadEnabled = false;
+                        appendHistory('Автоматическое прочтение выключено.');
+                    } else {
+                        appendHistory('Использование: автопрочтение [вкл|выкл]');
+                    }
+                    return;
+                }
+
+                // --- Обработка команд для каналов ---
+                if (command === 'канал') {
+                    if (args.length === 0) {
+                        appendHistory('Используйте: канал [создать|подписаться|отписаться|написать|прочитать|удалить]');
+                        return;
+                    }
+                    const sub = args[0];
+                    const subArgs = args.slice(1).join(' ');
+
+                    if (sub === 'создать') {
+                        if (!subArgs) {
+                            appendHistory('Укажите название канала.');
+                            return;
+                        }
+                        await channelCreate(subArgs);
+                    } else if (sub === 'подписаться') {
+                        if (!subArgs) {
+                            appendHistory('Укажите название канала.');
+                            return;
+                        }
+                        await channelSubscribe(subArgs);
+                    } else if (sub === 'отписаться') {
+                        if (!subArgs) {
+                            appendHistory('Укажите название канала.');
+                            return;
+                        }
+                        await channelUnsubscribe(subArgs);
+                    } else if (sub === 'написать') {
+                        const trimmedArgs = subArgs.trim();
+                        let chName = '';
+                        let message = '';
+
+                        if (trimmedArgs.startsWith('"')) {
+                            const closeQuoteIndex = trimmedArgs.indexOf('"', 1);
+                            if (closeQuoteIndex === -1) {
+                                appendHistory('Ошибка: не найдена закрывающая кавычка для названия канала.');
+                                return;
+                            }
+                            chName = trimmedArgs.substring(1, closeQuoteIndex).trim();
+                            message = trimmedArgs.substring(closeQuoteIndex + 1).trim();
+                            if (!chName || !message) {
+                                appendHistory('Ошибка: название и сообщение не могут быть пустыми.');
+                                return;
+                            }
+                        } else {
+                            const spaceIndex = trimmedArgs.indexOf(' ');
+                            if (spaceIndex === -1) {
+                                appendHistory('Укажите название канала и сообщение: канал написать [название] [текст] (для названий из нескольких слов используйте кавычки)');
+                                return;
+                            }
+                            chName = trimmedArgs.substring(0, spaceIndex).trim();
+                            message = trimmedArgs.substring(spaceIndex + 1).trim();
+                            if (!chName || !message) {
+                                appendHistory('Укажите название канала и сообщение.');
+                                return;
+                            }
+                        }
+                        await channelSend(chName, message);
+                    } else if (sub === 'прочитать') {
+                        if (!subArgs) {
+                            appendHistory('Укажите название канала.');
+                            return;
+                        }
+                        await channelRead(subArgs);  // здесь будет установлен hasReadManually
+                    } else if (sub === 'удалить') {
+                        if (!subArgs) {
+                            appendHistory('Укажите название канала.');
+                            return;
+                        }
+                        tempChannelName = subArgs;
+                        mode = 'awaiting_channel_delete_confirmation';
+                        appendHistory(`Вы уверены, что хотите удалить канал "${tempChannelName}"? (да/нет)`);
+                        currentInput = '';
+                        cursorPos = 0;
+                        render();
+                    } else {
+                        appendHistory(`Неизвестная подкоманда: ${sub}`);
+                    }
+                    return;
+                }
+
+                // --- Остальные команды ---
+                if (command === 'написать' && args.length >= 2) {
+                    const toId = args[0];
+                    const message = args.slice(1).join(' ');
+                    await apiCommand('написать', { to_id: toId, message: message });
+                } else if (command === 'профиль' && args.length >= 1) {
+                    await apiCommand('профиль', { profile_id: args[0] });
+                } else if (command === 'пинг' || command === 'ping') {
+                    await apiCommand('пинг', {});
+                } else if (command === 'мойид' || command === 'id') {
+                    appendHistory(`Ваш ID: ${currentUserId}`);
+                } else if (command === 'непрочитанные' || command === 'список') {
+                    await fetchUnreadSummary(false);
+                } else if (command === 'прочитать' && args.length >= 1 && args[0] !== 'всё') {
+                    await readMessages(args[0]);  // ручное чтение
+                } else if (command === 'прочитать всё' || (command === 'прочитать' && args[0] === 'всё')) {
+                    await readMessages();  // ручное чтение
+                } else if (command === 'помощь' || command === 'help') {
+                    showHelp();
+                } else if (command === 'выход' || command === 'exit') {
+                    authenticated = false;
+                    currentUserId = null;
+                    currentLogin = null;
+                    lastUnreadHash = null;
+                    autoReadEnabled = false;    // сбрасываем настройки
+                    hasReadManually = false;
+                    appendHistory('Вы вышли из аккаунта.');
+                    appendHistory('Доступные команды: вход, регистрация');
+                    stopPolling();
+                } else {
+                    appendHistory(`Неизвестная команда: ${command}. Введите "помощь" для списка команд.`);
+                }
+            }
+
+            function showHelp() {
+                appendHistory('Доступные команды:');
+                appendHistory('  написать [id] [сообщение]   - отправить личное сообщение');
+                appendHistory('  профиль [id]                - просмотр профиля');
+                appendHistory('  непрочитанные                - список контактов с непрочитанными');
+                appendHistory('  прочитать [id]               - прочитать личные сообщения от пользователя');
+                appendHistory('  прочитать всё                - прочитать все непрочитанные личные');
+                appendHistory('  пинг                         - проверка связи');
+                appendHistory('  мойид                        - показать свой ID');
+                appendHistory('  автопрочтение [вкл|выкл]     - включить/выключить авто-прочтение');
+                appendHistory('  помощь                       - эта справка');
+                appendHistory('  выход                        - выйти из аккаунта');
+                appendHistory('');
+                appendHistory('Команды для каналов:');
+                appendHistory('  канал создать [название]               - создать канал');
+                appendHistory('  канал подписаться [название]           - подписаться на канал');
+                appendHistory('  канал отписаться [название]            - отписаться от канала');
+                appendHistory('  канал написать ["название"] [сообщение]  - отправить сообщение (только владелец)');
+                appendHistory('  канал прочитать [название]             - прочитать новые сообщения');
+                appendHistory('  канал удалить [название]               - удалить канал (с подтверждением)');
+            }
+
+            function handleInputInMode(input) {
+                if (mode === 'awaiting_login') {
+                    tempLogin = input;
+                    mode = 'awaiting_password';
+                    appendHistory('Введите пароль:');
+                    currentInput = '';
+                    cursorPos = 0;
+                    render();
+                } else if (mode === 'awaiting_password') {
+                    tempPassword = input;
+                    performLogin(tempLogin, tempPassword);
+                } else if (mode === 'awaiting_register_login') {
+                    tempLogin = input;
+                    mode = 'awaiting_register_password';
+                    appendHistory('Придумайте пароль:');
+                    currentInput = '';
+                    cursorPos = 0;
+                    render();
+                } else if (mode === 'awaiting_register_password') {
+                    tempPassword = input;
+                    performRegister(tempLogin, tempPassword);
+                } else if (mode === 'awaiting_channel_delete_confirmation') {
+                    const answer = input.trim().toLowerCase();
+                    if (answer === 'да' || answer === 'yes' || answer === 'y' || answer === 'д') {
+                        channelDelete(tempChannelName);
+                    } else {
+                        appendHistory('Удаление отменено.');
+                    }
+                    resetMode();
+                }
+            }
+
+            async function performLogin(login, password) {
+                try {
+                    const resp = await fetch(`${API_BASE}/login`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ login, password })
+                    });
+                    if (!resp.ok) {
+                        const text = await resp.text();
+                        appendHistory(`Ошибка входа: HTTP ${resp.status} – ${text.substring(0,100)}`);
+                        resetMode();
+                        return;
+                    }
+                    const data = await resp.json();
+                    authenticated = true;
+                    currentUserId = data.id;
+                    currentLogin = data.login;
+                    // Сбрасываем флаги при входе
+                    hasReadManually = false;
+                    autoReadEnabled = false; // по умолчанию выключено
+                    appendHistory(`Добро пожаловать, ${data.login}!`);
+                    await fetchUnreadSummary(false);
+                    startPolling();
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                } finally {
+                    resetMode();
+                }
+            }
+
+            async function performRegister(login, password) {
+                try {
+                    const resp = await fetch(`${API_BASE}/register`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ login, password })
+                    });
+                    const text = await resp.text();
+                    let data;
+                    try {
+                        data = JSON.parse(text);
+                    } catch (e) {
+                        appendHistory(`Сервер вернул не JSON: ${text.substring(0,200)}`);
+                        resetMode();
+                        return;
+                    }
+                    if (resp.ok) {
+                        appendHistory(`Регистрация успешна! Ваш ID: ${data.id}. Теперь выполните вход.`);
+                    } else {
+                        appendHistory(`Ошибка регистрации: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                } finally {
+                    resetMode();
+                }
+            }
+
+            async function apiCommand(command, args) {
+                try {
+                    const resp = await fetch(`${API_BASE}/command`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            user_id: currentUserId,
+                            command: command,
+                            args: args
+                        })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        if (data.result && data.result.length) {
+                            data.result.forEach(line => appendHistory(line));
+                        }
+                    } else {
+                        appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            // --- Polling для уведомлений ---
+            let pollingInterval = null;
+            function startPolling() {
+                if (pollingInterval) clearInterval(pollingInterval);
+                pollingInterval = setInterval(async () => {
+                    if (!authenticated || !currentUserId) return;
+                    await fetchUnreadSummary(true);
+                }, 5000);
+            }
+
+            function stopPolling() {
+                if (pollingInterval) {
+                    clearInterval(pollingInterval);
+                    pollingInterval = null;
+                }
+            }
+
+            // --- Обработка клавиатуры (без изменений) ---
+            function handleKeyDown(e) {
+                const key = e.key;
+
+                if (e.ctrlKey && key === 'v') {
+                    e.preventDefault();
+                    navigator.clipboard.readText().then(text => {
+                        const before = currentInput.slice(0, cursorPos);
+                        const after = currentInput.slice(cursorPos);
+                        currentInput = before + text + after;
+                        cursorPos += text.length;
+                        render();
+                    }).catch(err => {
+                        appendHistory('Не удалось вставить текст: ' + err);
+                    });
+                    return;
+                }
+
+                if (key === 'Enter') {
+                    e.preventDefault();
+                    const cmd = currentInput;
+                    executeCommand(cmd);
+                    currentInput = '';
+                    cursorPos = 0;
+                    render();
+                    return;
+                }
+
+                if (key === 'Tab') {
+                    handleTab(e);
+                    return;
+                }
+
+                if (mode === 'normal') {
+                    if (key === 'ArrowUp') {
+                        e.preventDefault();
+                        if (historyIndex > 0) {
+                            historyIndex--;
+                            currentInput = commandHistory[historyIndex] || '';
+                            cursorPos = currentInput.length;
+                            render();
+                        }
+                        return;
+                    } else if (key === 'ArrowDown') {
+                        e.preventDefault();
+                        if (historyIndex < commandHistory.length - 1) {
+                            historyIndex++;
+                            currentInput = commandHistory[historyIndex] || '';
+                            cursorPos = currentInput.length;
+                            render();
+                        } else {
+                            historyIndex = commandHistory.length;
+                            currentInput = '';
+                            cursorPos = 0;
+                            render();
+                        }
+                        return;
+                    }
+                }
+
+                if (key === 'ArrowLeft') {
+                    e.preventDefault();
+                    if (cursorPos > 0) {
+                        cursorPos--;
+                        render();
+                    }
+                    return;
+                }
+                if (key === 'ArrowRight') {
+                    e.preventDefault();
+                    if (cursorPos < currentInput.length) {
+                        cursorPos++;
+                        render();
+                    }
+                    return;
+                }
+
+                if (key === 'Backspace') {
+                    e.preventDefault();
+                    if (cursorPos > 0) {
+                        const before = currentInput.slice(0, cursorPos - 1);
+                        const after = currentInput.slice(cursorPos);
+                        currentInput = before + after;
+                        cursorPos--;
+                        render();
+                    }
+                    return;
+                }
+
+                if (key === 'Delete') {
+                    e.preventDefault();
+                    if (cursorPos < currentInput.length) {
+                        const before = currentInput.slice(0, cursorPos);
+                        const after = currentInput.slice(cursorPos + 1);
+                        currentInput = before + after;
+                        render();
+                    }
+                    return;
+                }
+
+                if (key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                    e.preventDefault();
+                    const before = currentInput.slice(0, cursorPos);
+                    const after = currentInput.slice(cursorPos);
+                    currentInput = before + key + after;
+                    cursorPos++;
+                    render();
+                    return;
+                }
+            }
+
+            outputArea.addEventListener('keydown', handleKeyDown);
+            terminalContainer.addEventListener('click', () => outputArea.focus());
+            outputArea.focus();
+
+            render();
+        })();
+    </script>
+</body>
+</html>
