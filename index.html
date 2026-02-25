@@ -68,6 +68,7 @@
             border-bottom: 1px dotted #1e2f3a;
             padding-bottom: 2px;
         }
+        /* Старый стиль для input-line (desktop) */
         .input-line {
             display: flex;
             align-items: center;
@@ -85,18 +86,65 @@
             text-shadow: 0 0 5px #1affaa;
             flex-shrink: 0;
         }
-        .input-field {
+        .input-text {
+            position: relative;
+            display: flex;
+            align-items: center;
+            font-family: inherit;
+            font-size: inherit;
+            line-height: 1.5;
+            color: #d0e0e0;
+            white-space: pre;
+            flex: 1;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        .input-part {
+            white-space: pre;
+        }
+        .cursor {
+            display: inline-block;
+            width: 0.6em;
+            height: 1.2em;
+            background-color: #8ae2b0;
+            margin: 0 1px;
+            animation: blink 1s step-end infinite;
+            vertical-align: middle;
+            box-shadow: 0 0 8px #6fcf97;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+        /* Новый стиль для input (mobile) */
+        .mobile-input-line {
+            display: flex;
+            align-items: center;
+            background: #0e1219;
+            padding: 10px 20px;
+            border-top: 1px solid #2a3a4a;
+            box-shadow: 0 -5px 15px rgba(0, 255, 255, 0.1);
+            font-family: 'Courier New', Courier, monospace;
+        }
+        .mobile-prompt {
+            color: #6fcf97;
+            margin-right: 12px;
+            font-weight: bold;
+            text-shadow: 0 0 5px #1affaa;
+            flex-shrink: 0;
+        }
+        .mobile-input {
             background: transparent;
             border: none;
             color: #d0e0e0;
             font-family: inherit;
-            font-size: inherit;
+            font-size: 16px; /* предотвращает масштабирование на iOS */
             line-height: 1.5;
             width: 100%;
             outline: none;
             caret-color: #8ae2b0;
         }
-        .input-field::placeholder {
+        .mobile-input::placeholder {
             color: #3a4a5a;
             font-style: italic;
         }
@@ -117,9 +165,6 @@
                 font-size: 14px;
                 padding: 12px 16px;
             }
-            .input-field {
-                font-size: 16px; /* предотвращает зум на iOS */
-            }
         }
     </style>
     <!-- Подключаем Socket.IO клиент -->
@@ -128,13 +173,43 @@
 <body>
     <div class="dos-terminal" id="terminalContainer">
         <div class="dos-screen" id="outputArea"></div>
-        <div class="input-line">
-            <span class="prompt" id="prompt"></span>
-            <input type="text" class="input-field" id="commandInput" autofocus placeholder="Введите команду">
+        <!-- Старый интерфейс (desktop) -->
+        <div class="input-line" id="oldInputLine" style="display: none;">
+            <span class="prompt" id="oldPrompt"></span>
+            <span class="input-text" id="oldInputText">
+                <span class="input-part" id="leftPart"></span>
+                <span class="cursor"></span>
+                <span class="input-part" id="rightPart"></span>
+            </span>
+        </div>
+        <!-- Новый интерфейс (mobile) -->
+        <div class="mobile-input-line" id="newInputLine" style="display: none;">
+            <span class="mobile-prompt" id="newPrompt"></span>
+            <input type="text" class="mobile-input" id="mobileCommandInput" autofocus placeholder="Введите команду">
         </div>
     </div>
     <script>
         (function() {
+            // Определяем мобильность
+            const isMobile = window.innerWidth < 768 || 'ontouchstart' in window;
+
+            // Показываем нужный интерфейс
+            const oldInputLine = document.getElementById('oldInputLine');
+            const newInputLine = document.getElementById('newInputLine');
+            const oldPrompt = document.getElementById('oldPrompt');
+            const newPrompt = document.getElementById('newPrompt');
+            const leftPart = document.getElementById('leftPart');
+            const rightPart = document.getElementById('rightPart');
+            const mobileInput = document.getElementById('mobileCommandInput');
+
+            if (isMobile) {
+                oldInputLine.style.display = 'none';
+                newInputLine.style.display = 'flex';
+            } else {
+                oldInputLine.style.display = 'flex';
+                newInputLine.style.display = 'none';
+            }
+
             const API_BASE = '';
             let history = [];               // массив строк для вывода
             let commandHistory = [];         // история введённых команд
@@ -149,12 +224,14 @@
             let lastUnreadHash = null;
             let autoReadEnabled = false;
 
+            // Для старого интерфейса: текущий ввод и позиция курсора
+            let currentInput = '';
+            let cursorPos = 0;
+
             // WebSocket
             let socket = null;
 
             const outputArea = document.getElementById('outputArea');
-            const commandInput = document.getElementById('commandInput');
-            const promptSpan = document.getElementById('prompt');
 
             const initialLines = [
                 'Добро пожаловать в терминал.',
@@ -186,6 +263,43 @@
                 }
                 outputArea.innerHTML = html;
                 outputArea.scrollTop = outputArea.scrollHeight;
+
+                // Если старый интерфейс, обновляем строку ввода
+                if (!isMobile) {
+                    updateOldInputLine();
+                }
+            }
+
+            function updateOldInputLine() {
+                let promptStr = '';
+                if (!authenticated && mode === 'normal') promptStr = '>';
+                else if (authenticated && mode === 'normal') promptStr = `${currentLogin}@pc:~$`;
+                else if (mode === 'awaiting_login') promptStr = 'Логин:';
+                else if (mode === 'awaiting_password') promptStr = 'Пароль:';
+                else if (mode === 'awaiting_register_login') promptStr = 'Придумайте логин:';
+                else if (mode === 'awaiting_register_password') promptStr = 'Придумайте пароль:';
+                else if (mode === 'awaiting_channel_delete_confirmation') promptStr = 'Подтверждение:';
+                oldPrompt.textContent = promptStr;
+
+                let displayText = currentInput;
+                if (mode === 'awaiting_password' || mode === 'awaiting_register_password') {
+                    displayText = '*'.repeat(currentInput.length);
+                }
+                const safePos = Math.min(cursorPos, displayText.length);
+                leftPart.textContent = displayText.slice(0, safePos);
+                rightPart.textContent = displayText.slice(safePos);
+            }
+
+            function updateNewPrompt() {
+                let promptStr = '';
+                if (!authenticated && mode === 'normal') promptStr = '>';
+                else if (authenticated && mode === 'normal') promptStr = `${currentLogin}@pc:~$`;
+                else if (mode === 'awaiting_login') promptStr = 'Логин:';
+                else if (mode === 'awaiting_password') promptStr = 'Пароль:';
+                else if (mode === 'awaiting_register_login') promptStr = 'Придумайте логин:';
+                else if (mode === 'awaiting_register_password') promptStr = 'Придумайте пароль:';
+                else if (mode === 'awaiting_channel_delete_confirmation') promptStr = 'Подтверждение:';
+                newPrompt.textContent = promptStr;
             }
 
             function appendHistory(text) {
@@ -193,24 +307,18 @@
                 render();
             }
 
-            function setPrompt() {
-                if (!authenticated && mode === 'normal') promptSpan.textContent = '>';
-                else if (authenticated && mode === 'normal') promptSpan.textContent = `${currentLogin}@pc:~$`;
-                else if (mode === 'awaiting_login') promptSpan.textContent = 'Логин:';
-                else if (mode === 'awaiting_password') promptSpan.textContent = 'Пароль:';
-                else if (mode === 'awaiting_register_login') promptSpan.textContent = 'Придумайте логин:';
-                else if (mode === 'awaiting_register_password') promptSpan.textContent = 'Придумайте пароль:';
-                else if (mode === 'awaiting_channel_delete_confirmation') promptSpan.textContent = 'Подтверждение:';
-                else promptSpan.textContent = '>';
-            }
-
             function resetMode() {
                 mode = 'normal';
                 tempLogin = '';
                 tempPassword = '';
                 tempChannelName = '';
-                commandInput.value = '';
-                setPrompt();
+                if (isMobile) {
+                    mobileInput.value = '';
+                    updateNewPrompt();
+                } else {
+                    currentInput = '';
+                    cursorPos = 0;
+                }
                 render();
             }
 
@@ -569,12 +677,10 @@
                 }
             }
 
-            function handleTab() {
+            function handleTab(currentValue, cursorPosition, setValueCallback) {
                 if (mode !== 'normal') return;
-                const input = commandInput.value;
-                const cursorPos = commandInput.selectionStart;
-                const beforeCursor = input.slice(0, cursorPos);
-                const afterCursor = input.slice(cursorPos);
+                const beforeCursor = currentValue.slice(0, cursorPosition);
+                const afterCursor = currentValue.slice(cursorPosition);
                 const lastSpaceBefore = beforeCursor.lastIndexOf(' ');
                 const startOfWord = lastSpaceBefore === -1 ? 0 : lastSpaceBefore + 1;
                 const wordPrefix = beforeCursor.slice(startOfWord);
@@ -585,31 +691,24 @@
                 if (completions.length === 1) {
                     const completion = completions[0];
                     const newBefore = beforeCursor.slice(0, startOfWord) + completion;
-                    commandInput.value = newBefore + afterCursor;
-                    commandInput.setSelectionRange(newBefore.length, newBefore.length);
+                    const newValue = newBefore + afterCursor;
+                    setValueCallback(newValue, newBefore.length);
                 } else {
                     appendHistory('Возможные варианты: ' + completions.join(', '));
                 }
             }
 
-            function handleCommandInput() {
-                const cmd = commandInput.value;
-                if (mode === 'normal') {
-                    commandHistory.push(cmd);
-                    historyIndex = commandHistory.length;
-                    let promptChar = authenticated ? `${currentLogin}@pc:~$` : '>';
-                    appendHistory(`${promptChar} ${cmd}`);
-                    executeCommand(cmd);
-                    commandInput.value = '';
-                } else {
-                    handleInputInMode(cmd);
-                    commandInput.value = '';
-                }
-            }
-
             function executeCommand(cmd) {
                 const trimmed = cmd.trim();
-                if (trimmed === '') return;
+                if (trimmed === '' && mode === 'normal') return;
+                if (mode !== 'normal') {
+                    handleInputInMode(trimmed);
+                    return;
+                }
+                commandHistory.push(trimmed);
+                historyIndex = commandHistory.length;
+                let promptChar = authenticated ? `${currentLogin}@pc:~$` : '>';
+                appendHistory(`${promptChar} ${trimmed}`);
                 const parts = trimmed.toLowerCase().split(' ');
                 const command = parts[0];
                 const args = parts.slice(1);
@@ -623,7 +722,14 @@
                     } else {
                         appendHistory('Неизвестная команда. Доступные: вход, регистрация');
                     }
-                    setPrompt();
+                    if (isMobile) {
+                        mobileInput.value = '';
+                        updateNewPrompt();
+                    } else {
+                        currentInput = '';
+                        cursorPos = 0;
+                    }
+                    render();
                     return;
                 }
                 // Авторизованные команды
@@ -685,7 +791,15 @@
                         tempChannelName = subArgs;
                         mode = 'awaiting_channel_delete_confirmation';
                         appendHistory(`Вы уверены, что хотите удалить канал "${tempChannelName}"? (да/нет)`);
-                        setPrompt();
+                        if (isMobile) {
+                            mobileInput.value = '';
+                            updateNewPrompt();
+                        } else {
+                            currentInput = '';
+                            cursorPos = 0;
+                        }
+                        render();
+                        return;
                     } else {
                         appendHistory(`Неизвестная подкоманда: ${sub}`);
                     }
@@ -721,6 +835,13 @@
                 } else {
                     appendHistory(`Неизвестная команда: ${command}. Введите "помощь" для списка команд.`);
                 }
+                if (isMobile) {
+                    mobileInput.value = '';
+                } else {
+                    currentInput = '';
+                    cursorPos = 0;
+                }
+                render();
             }
 
             function showHelp() {
@@ -769,46 +890,166 @@
                     }
                     resetMode();
                 }
-                setPrompt();
+                if (isMobile) {
+                    mobileInput.value = '';
+                    updateNewPrompt();
+                } else {
+                    currentInput = '';
+                    cursorPos = 0;
+                }
+                render();
             }
 
-            // ---------- Обработка событий ввода ----------
-            commandInput.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleCommandInput();
-                } else if (e.key === 'Tab') {
-                    e.preventDefault();
-                    handleTab();
-                } else if (e.key === 'ArrowUp') {
-                    if (mode === 'normal') {
+            // ---------- Обработчики событий для старого интерфейса ----------
+            if (!isMobile) {
+                outputArea.addEventListener('keydown', (e) => {
+                    const key = e.key;
+                    if (e.ctrlKey && key === 'v') {
+                        e.preventDefault();
+                        navigator.clipboard.readText().then(text => {
+                            const before = currentInput.slice(0, cursorPos);
+                            const after = currentInput.slice(cursorPos);
+                            currentInput = before + text + after;
+                            cursorPos += text.length;
+                            render();
+                        }).catch(err => {
+                            appendHistory('Не удалось вставить текст: ' + err);
+                        });
+                        return;
+                    }
+                    if (key === 'Enter') {
+                        e.preventDefault();
+                        const cmd = currentInput;
+                        executeCommand(cmd);
+                        return;
+                    }
+                    if (key === 'Tab') {
+                        e.preventDefault();
+                        handleTab(currentInput, cursorPos, (newVal, newPos) => {
+                            currentInput = newVal;
+                            cursorPos = newPos;
+                            render();
+                        });
+                        return;
+                    }
+                    if (key === 'ArrowUp') {
                         e.preventDefault();
                         if (historyIndex > 0) {
                             historyIndex--;
-                            commandInput.value = commandHistory[historyIndex] || '';
+                            currentInput = commandHistory[historyIndex] || '';
+                            cursorPos = currentInput.length;
+                            render();
                         }
+                        return;
                     }
-                } else if (e.key === 'ArrowDown') {
-                    if (mode === 'normal') {
+                    if (key === 'ArrowDown') {
                         e.preventDefault();
                         if (historyIndex < commandHistory.length - 1) {
                             historyIndex++;
-                            commandInput.value = commandHistory[historyIndex] || '';
+                            currentInput = commandHistory[historyIndex] || '';
+                            cursorPos = currentInput.length;
+                            render();
                         } else {
                             historyIndex = commandHistory.length;
-                            commandInput.value = '';
+                            currentInput = '';
+                            cursorPos = 0;
+                            render();
                         }
+                        return;
                     }
-                }
-            });
+                    if (key === 'ArrowLeft') {
+                        e.preventDefault();
+                        if (cursorPos > 0) { cursorPos--; render(); }
+                        return;
+                    }
+                    if (key === 'ArrowRight') {
+                        e.preventDefault();
+                        if (cursorPos < currentInput.length) { cursorPos++; render(); }
+                        return;
+                    }
+                    if (key === 'Backspace') {
+                        e.preventDefault();
+                        if (cursorPos > 0) {
+                            const before = currentInput.slice(0, cursorPos - 1);
+                            const after = currentInput.slice(cursorPos);
+                            currentInput = before + after;
+                            cursorPos--;
+                            render();
+                        }
+                        return;
+                    }
+                    if (key === 'Delete') {
+                        e.preventDefault();
+                        if (cursorPos < currentInput.length) {
+                            const before = currentInput.slice(0, cursorPos);
+                            const after = currentInput.slice(cursorPos + 1);
+                            currentInput = before + after;
+                            render();
+                        }
+                        return;
+                    }
+                    if (key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                        e.preventDefault();
+                        const before = currentInput.slice(0, cursorPos);
+                        const after = currentInput.slice(cursorPos);
+                        currentInput = before + key + after;
+                        cursorPos++;
+                        render();
+                        return;
+                    }
+                });
 
-            // Автофокус при клике на терминал
-            terminalContainer.addEventListener('click', () => commandInput.focus());
+                terminalContainer.addEventListener('click', () => outputArea.focus());
+                outputArea.focus();
+            }
+
+            // ---------- Обработчики событий для мобильного интерфейса ----------
+            if (isMobile) {
+                mobileInput.addEventListener('keydown', (e) => {
+                    const key = e.key;
+                    if (key === 'Enter') {
+                        e.preventDefault();
+                        const cmd = mobileInput.value;
+                        executeCommand(cmd);
+                        mobileInput.value = '';
+                        return;
+                    }
+                    if (key === 'Tab') {
+                        e.preventDefault();
+                        const input = mobileInput;
+                        handleTab(input.value, input.selectionStart, (newVal, newPos) => {
+                            input.value = newVal;
+                            input.setSelectionRange(newPos, newPos);
+                        });
+                        return;
+                    }
+                    if (key === 'ArrowUp') {
+                        e.preventDefault();
+                        if (historyIndex > 0) {
+                            historyIndex--;
+                            mobileInput.value = commandHistory[historyIndex] || '';
+                        }
+                        return;
+                    }
+                    if (key === 'ArrowDown') {
+                        e.preventDefault();
+                        if (historyIndex < commandHistory.length - 1) {
+                            historyIndex++;
+                            mobileInput.value = commandHistory[historyIndex] || '';
+                        } else {
+                            historyIndex = commandHistory.length;
+                            mobileInput.value = '';
+                        }
+                        return;
+                    }
+                });
+
+                terminalContainer.addEventListener('click', () => mobileInput.focus());
+                mobileInput.focus();
+            }
 
             // Инициализация
-            setPrompt();
             render();
-            commandInput.focus();
         })();
     </script>
 </body>
