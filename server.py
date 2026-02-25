@@ -13,8 +13,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 app = Flask(__name__, static_folder='.', static_url_path='')
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB для аудио
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'mp3', 'wav', 'ogg', 'm4a', 'flac'}
 
 CORS(app)
 
@@ -70,9 +70,11 @@ def init_db():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 delivered BOOLEAN DEFAULT 0,
                 image_id INTEGER,
+                audio_id INTEGER,
                 FOREIGN KEY(from_id) REFERENCES users(id),
                 FOREIGN KEY(to_id) REFERENCES users(id),
-                FOREIGN KEY(image_id) REFERENCES images(id)
+                FOREIGN KEY(image_id) REFERENCES images(id),
+                FOREIGN KEY(audio_id) REFERENCES audio(id)
             )
         ''')
         # Каналы
@@ -106,9 +108,11 @@ def init_db():
                 content TEXT NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 image_id INTEGER,
+                audio_id INTEGER,
                 FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE,
                 FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(image_id) REFERENCES images(id)
+                FOREIGN KEY(image_id) REFERENCES images(id),
+                FOREIGN KEY(audio_id) REFERENCES audio(id)
             )
         ''')
         # Статус прочтения каналов
@@ -133,6 +137,18 @@ def init_db():
                 FOREIGN KEY(uploader_id) REFERENCES users(id)
             )
         ''')
+        # Аудио
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS audio (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_filename TEXT NOT NULL,
+                stored_filename TEXT NOT NULL UNIQUE,
+                uploader_id INTEGER NOT NULL,
+                uploaded TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                duration INTEGER,  -- длительность в секундах (можно заполнять позже)
+                FOREIGN KEY(uploader_id) REFERENCES users(id)
+            )
+        ''')
         # Индексы
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_to_delivered ON messages(to_id, delivered)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_id)')
@@ -140,6 +156,7 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_channel_messages_channel ON channel_messages(channel_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_uploader ON images(uploader_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audio_uploader ON audio(uploader_id)')
 
         cursor.execute("INSERT OR IGNORE INTO users (id, login, password_hash) VALUES (0, 'system', '')")
         db.commit()
@@ -198,7 +215,7 @@ def get_undelivered_messages(user_id, from_id=None):
     db = get_db()
     if from_id is None:
         cursor = db.execute('''
-            SELECT m.id, m.from_id, m.content, m.timestamp, u.login as from_login, m.image_id
+            SELECT m.id, m.from_id, m.content, m.timestamp, u.login as from_login, m.image_id, m.audio_id
             FROM messages m
             JOIN users u ON m.from_id = u.id
             WHERE m.to_id = ? AND m.delivered = 0
@@ -206,7 +223,7 @@ def get_undelivered_messages(user_id, from_id=None):
         ''', (user_id,))
     else:
         cursor = db.execute('''
-            SELECT m.id, m.from_id, m.content, m.timestamp, u.login as from_login, m.image_id
+            SELECT m.id, m.from_id, m.content, m.timestamp, u.login as from_login, m.image_id, m.audio_id
             FROM messages m
             JOIN users u ON m.from_id = u.id
             WHERE m.to_id = ? AND m.from_id = ? AND m.delivered = 0
@@ -224,18 +241,19 @@ def get_undelivered_messages(user_id, from_id=None):
             'from_login': m['from_login'],
             'content': m['content'],
             'timestamp': m['timestamp'],
-            'image_id': m['image_id']
+            'image_id': m['image_id'],
+            'audio_id': m['audio_id']
         }
         result.append(msg)
     return result
 
-def save_message(from_id, to_id, content, image_id=None):
+def save_message(from_id, to_id, content, image_id=None, audio_id=None):
     if len(content) > 1000:
         raise ValueError("Сообщение слишком длинное (макс. 1000 символов)")
     db = get_db()
     db.execute('''
-        INSERT INTO messages (from_id, to_id, content, delivered, image_id) VALUES (?, ?, ?, 0, ?)
-    ''', (from_id, to_id, content, image_id))
+        INSERT INTO messages (from_id, to_id, content, delivered, image_id, audio_id) VALUES (?, ?, ?, 0, ?, ?)
+    ''', (from_id, to_id, content, image_id, audio_id))
     db.commit()
     socketio.emit(f'user_{to_id}_new_message', {'from': from_id}, room=f'user_{to_id}')
 
@@ -264,14 +282,14 @@ def unsubscribe_user(channel_id, user_id):
     db.execute('DELETE FROM channel_subscribers WHERE channel_id = ? AND user_id = ?', (channel_id, user_id))
     db.commit()
 
-def add_channel_message(channel_id, user_id, content, image_id=None):
+def add_channel_message(channel_id, user_id, content, image_id=None, audio_id=None):
     if len(content) > 1000:
         raise ValueError("Сообщение слишком длинное (макс. 1000 символов)")
     db = get_db()
     cursor = db.cursor()
     cursor.execute('''
-        INSERT INTO channel_messages (channel_id, user_id, content, image_id) VALUES (?, ?, ?, ?)
-    ''', (channel_id, user_id, content, image_id))
+        INSERT INTO channel_messages (channel_id, user_id, content, image_id, audio_id) VALUES (?, ?, ?, ?, ?)
+    ''', (channel_id, user_id, content, image_id, audio_id))
     db.commit()
     msg_id = cursor.lastrowid
     cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ?', (channel_id,))
@@ -310,7 +328,7 @@ def get_channel_messages(user_id, channel_id):
     row = cursor.fetchone()
     last_read = row['last_read_message_id'] if row else 0
     cursor = db.execute('''
-        SELECT m.id, m.user_id, u.login as user_login, m.content, m.timestamp, m.image_id
+        SELECT m.id, m.user_id, u.login as user_login, m.content, m.timestamp, m.image_id, m.audio_id
         FROM channel_messages m
         JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.id > ?
@@ -328,7 +346,8 @@ def get_channel_messages(user_id, channel_id):
             'user_login': m['user_login'],
             'content': m['content'],
             'timestamp': m['timestamp'],
-            'image_id': m['image_id']
+            'image_id': m['image_id'],
+            'audio_id': m['audio_id']
         })
     return result
 
@@ -528,8 +547,9 @@ def channel_send():
     channel_name = data.get('channel_name', '').strip()
     content = data.get('content', '').strip()
     image_id = data.get('image_id')
-    if not user_id or not channel_name or (not content and not image_id):
-        return jsonify({'error': 'Не указан user_id, название канала или сообщение/изображение'}), 400
+    audio_id = data.get('audio_id')
+    if not user_id or not channel_name or (not content and not image_id and not audio_id):
+        return jsonify({'error': 'Не указан user_id, название канала или сообщение/изображение/аудио'}), 400
     if content and len(content) > 1000:
         return jsonify({'error': 'Сообщение слишком длинное (макс. 1000 символов)'}), 400
     user = get_user_by_id(user_id)
@@ -541,7 +561,7 @@ def channel_send():
     if channel['owner_id'] != user_id:
         return jsonify({'error': 'Только владелец канала может отправлять сообщения'}), 403
     update_last_seen(user_id)
-    add_channel_message(channel['id'], user_id, content or '', image_id)
+    add_channel_message(channel['id'], user_id, content or '', image_id, audio_id)
     return jsonify({'result': [f'Сообщение отправлено в канал "{channel_name}".'], 'error': None})
 
 @app.route('/channel/read', methods=['POST'])
@@ -567,6 +587,8 @@ def channel_read():
             line = f'[{msg["timestamp"]}] {msg["user_login"]}: {msg["content"]}'
             if msg['image_id']:
                 line += f' [Изображение ID: {msg["image_id"]}]'
+            if msg['audio_id']:
+                line += f' [Аудио ID: {msg["audio_id"]}]'
             result_lines.append(line)
     else:
         result_lines.append('Нет новых сообщений.')
@@ -607,8 +629,9 @@ def handle_command():
         to_id = args.get('to_id')
         message = args.get('message', '').strip()
         image_id = args.get('image_id')
-        if not to_id or (not message and not image_id):
-            result_lines.append('Ошибка: укажите ID получателя и сообщение или изображение.')
+        audio_id = args.get('audio_id')
+        if not to_id or (not message and not image_id and not audio_id):
+            result_lines.append('Ошибка: укажите ID получателя и сообщение, изображение или аудио.')
         else:
             if int(to_id) == user_id:
                 result_lines.append('Ошибка: нельзя отправить сообщение самому себе.')
@@ -618,7 +641,7 @@ def handle_command():
                     result_lines.append(f'Ошибка: пользователь с ID {to_id} не найден')
                 else:
                     try:
-                        save_message(user_id, to_id, message or '', image_id)
+                        save_message(user_id, to_id, message or '', image_id, audio_id)
                         result_lines.append(f'Сообщение для {recipient["login"]} (ID {to_id}) отправлено')
                         update_last_seen(user_id)
                     except ValueError as e:
@@ -688,7 +711,6 @@ def set_color():
     user = get_user_by_id(user_id)
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
-    # допустимые цвета
     valid_colors = ['зеленый', 'красный', 'синий', 'желтый', 'оранжевый', 'розовый', 'голубой']
     if color not in valid_colors:
         return jsonify({'error': f'Недопустимый цвет. Доступны: {", ".join(valid_colors)}'}), 400
@@ -712,19 +734,30 @@ def upload_image():
     if file.filename == '':
         return jsonify({'error': 'Файл не выбран'}), 400
     if not allowed_file(file.filename):
-        return jsonify({'error': 'Недопустимый тип файла. Разрешены: png, jpg, jpeg, gif, bmp, webp'}), 400
+        return jsonify({'error': 'Недопустимый тип файла. Разрешены: png, jpg, jpeg, gif, bmp, webp, mp3, wav, ogg, m4a, flac'}), 400
     ext = file.filename.rsplit('.', 1)[1].lower()
     stored_filename = f"{uuid.uuid4().hex}.{ext}"
     file.save(os.path.join(app.config['UPLOAD_FOLDER'], stored_filename))
     db = get_db()
     cursor = db.cursor()
-    cursor.execute('''
-        INSERT INTO images (original_filename, stored_filename, uploader_id)
-        VALUES (?, ?, ?)
-    ''', (file.filename, stored_filename, user_id))
-    db.commit()
-    image_id = cursor.lastrowid
-    return jsonify({'result': {'image_id': image_id}, 'error': None})
+    # Определяем тип: если аудио, сохраняем в audio, иначе в images
+    if ext in ['mp3', 'wav', 'ogg', 'm4a', 'flac']:
+        cursor.execute('''
+            INSERT INTO audio (original_filename, stored_filename, uploader_id)
+            VALUES (?, ?, ?)
+        ''', (file.filename, stored_filename, user_id))
+        db.commit()
+        media_id = cursor.lastrowid
+        media_type = 'audio'
+    else:
+        cursor.execute('''
+            INSERT INTO images (original_filename, stored_filename, uploader_id)
+            VALUES (?, ?, ?)
+        ''', (file.filename, stored_filename, user_id))
+        db.commit()
+        media_id = cursor.lastrowid
+        media_type = 'image'
+    return jsonify({'result': {'media_id': media_id, 'type': media_type}, 'error': None})
 
 @app.route('/image/<int:image_id>')
 def get_image(image_id):
@@ -733,6 +766,15 @@ def get_image(image_id):
     row = cursor.fetchone()
     if not row:
         return 'Изображение не найдено', 404
+    return send_from_directory(app.config['UPLOAD_FOLDER'], row['stored_filename'])
+
+@app.route('/audio/<int:audio_id>')
+def get_audio(audio_id):
+    db = get_db()
+    cursor = db.execute('SELECT stored_filename FROM audio WHERE id = ?', (audio_id,))
+    row = cursor.fetchone()
+    if not row:
+        return 'Аудио не найдено', 404
     return send_from_directory(app.config['UPLOAD_FOLDER'], row['stored_filename'])
 
 @app.route('/')
