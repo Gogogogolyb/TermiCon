@@ -96,7 +96,6 @@
             pointer-events: auto;
         }
 
-        /* Стили окна Win95 */
         .win95-window {
             position: absolute;
             background: #c0c0c0;
@@ -167,7 +166,6 @@
             display: block;
             margin: 0 auto;
         }
-        /* Ретро-плеер внутри окна */
         .win95-window .window-content .retro-audio {
             background: #2b2b2b;
             border: 2px solid #7b7b7b;
@@ -182,7 +180,6 @@
             filter: sepia(1) hue-rotate(60deg) brightness(0.8);
         }
 
-        /* Основной экран терминала */
         .dos-screen {
             flex: 1;
             background: transparent;
@@ -321,7 +318,6 @@
             color: #ffcc99;
         }
 
-        /* Ретро-плеер для сообщений */
         .retro-audio {
             background: #2b2b2b;
             border: 2px solid #7b7b7b;
@@ -448,7 +444,7 @@
 
             const initialLines = [
                 'Добро пожаловать в терминал.',
-                'Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн',
+                'Доступные команды: вход, регистрация',
                 ''
             ];
             history.push(...initialLines);
@@ -566,7 +562,6 @@
                             linked += ` <span class="media-link" onclick="openMediaWindow('image', ${lineObj.imageId})">[Изображение ID: ${lineObj.imageId}]</span>`;
                         }
                         if (lineObj.audioId) {
-                            // Для аудио добавляем стилизованный плеер
                             linked += ` <div class="retro-audio"><audio controls src="/audio/${lineObj.audioId}"></audio><span class="audio-label">ID: ${lineObj.audioId}</span></div>`;
                         }
                         html += `<div class="output-line">${linked}</div>`;
@@ -599,6 +594,92 @@
                 render();
             }
 
+            // --- Сохранение сессии ---
+            function saveSession() {
+                if (authenticated && currentUserId) {
+                    const session = {
+                        userId: currentUserId,
+                        login: currentLogin,
+                        color: currentColor,
+                        timestamp: Date.now()
+                    };
+                    localStorage.setItem('termicon_session', JSON.stringify(session));
+                }
+            }
+
+            function loadSession() {
+                const saved = localStorage.getItem('termicon_session');
+                if (saved) {
+                    try {
+                        const session = JSON.parse(saved);
+                        if (Date.now() - session.timestamp < 7 * 24 * 60 * 60 * 1000) {
+                            return session;
+                        }
+                    } catch (e) {}
+                }
+                return null;
+            }
+
+            function clearSession() {
+                localStorage.removeItem('termicon_session');
+            }
+
+            // --- Сохранение истории команд ---
+            function saveCommandHistory() {
+                localStorage.setItem('termicon_history', JSON.stringify(commandHistory));
+            }
+
+            function loadCommandHistory() {
+                const saved = localStorage.getItem('termicon_history');
+                if (saved) {
+                    try {
+                        commandHistory = JSON.parse(saved);
+                        historyIndex = commandHistory.length;
+                    } catch (e) {}
+                }
+            }
+
+            loadCommandHistory();
+
+            // --- Проверка сессии при загрузке ---
+            async function checkSession() {
+                const session = loadSession();
+                if (!session) return;
+                try {
+                    const resp = await fetch(`${API_BASE}/check_session`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: session.userId })
+                    });
+                    const data = await resp.json();
+                    if (resp.ok && !data.error) {
+                        const user = data.result;
+                        authenticated = true;
+                        currentUserId = user.id;
+                        currentLogin = user.login;
+                        autoReadEnabled = false;
+                        pendingImageId = null;
+                        pendingAudioId = null;
+                        if (user.color_pref) {
+                            setTextColor(user.color_pref);
+                        } else if (session.color) {
+                            setTextColor(session.color);
+                        }
+                        appendHistory(`Добро пожаловать, ${user.login}! (сессия восстановлена)`);
+                        await fetchUnreadSummary(false);
+                        connectWebSocket();
+                    } else {
+                        clearSession();
+                    }
+                } catch (err) {
+                    console.error('Session check error', err);
+                    clearSession();
+                }
+            }
+
+            setTimeout(checkSession, 100);
+
+            // --- WebSocket ---
             function connectWebSocket() {
                 if (socket && socket.connected) return;
                 socket = io(API_BASE || window.location.origin, {
@@ -646,6 +727,7 @@
                 }
             }
 
+            // --- Запросы к серверу ---
             async function fetchUnreadSummary(silent = false) {
                 if (!authenticated || !currentUserId) return null;
                 try {
@@ -913,6 +995,7 @@
                     appendHistory(`Добро пожаловать, ${user.login}!`);
                     await fetchUnreadSummary(false);
                     connectWebSocket();
+                    saveSession();
                 } catch (err) {
                     appendHistory(`Ошибка соединения: ${err.message}`);
                 } finally {
@@ -1063,6 +1146,7 @@
                     if (resp.ok && !data.error) {
                         appendHistory(data.result);
                         setTextColor(color);
+                        saveSession(); // обновляем цвет в сессии
                     } else {
                         appendHistory(`Ошибка: ${data.error || 'неизвестная ошибка'}`);
                     }
@@ -1192,6 +1276,7 @@
 
                 commandHistory.push(trimmed);
                 historyIndex = commandHistory.length;
+                saveCommandHistory(); // сохраняем историю
 
                 const promptChar = authenticated ? `${currentLogin}@pc:~$` : '>';
                 appendHistory(`${promptChar} ${trimmed}`);
@@ -1318,7 +1403,8 @@
                     pendingImageId = null;
                     pendingAudioId = null;
                     disconnectWebSocket();
-                    setTextColor('зеленый'); // сбрасываем цвет
+                    setTextColor('зеленый'); // принудительно ставим зелёный
+                    clearSession(); // удаляем сессию
                     appendHistory('Вы вышли из аккаунта.');
                     appendHistory('Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн');
                 } else if (command === 'загрузить' && args[0] === 'картинку') {
