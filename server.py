@@ -3,10 +3,24 @@ import datetime
 import random
 from flask import Flask, request, jsonify, g, send_from_directory
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__, static_folder='.', static_url_path='')
+app.config['SECRET_KEY'] = 'your-secret-key-here'  # Измените в продакшене!
 CORS(app)
+
+# Настройка SocketIO
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Настройка лимитера (хранилище в памяти)
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"]
+)
 
 DATABASE = 'terminal.db'
 
@@ -27,6 +41,7 @@ def init_db():
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
+        # Пользователи
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
@@ -36,6 +51,7 @@ def init_db():
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Личные сообщения
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,6 +64,7 @@ def init_db():
                 FOREIGN KEY(to_id) REFERENCES users(id)
             )
         ''')
+        # Каналы
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,6 +75,7 @@ def init_db():
                 FOREIGN KEY(owner_id) REFERENCES users(id)
             )
         ''')
+        # Подписчики каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channel_subscribers (
                 channel_id INTEGER NOT NULL,
@@ -68,6 +86,7 @@ def init_db():
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         ''')
+        # Сообщения каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channel_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,6 +98,7 @@ def init_db():
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
         ''')
+        # Статус прочтения каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channel_read_status (
                 user_id INTEGER NOT NULL,
@@ -89,9 +109,20 @@ def init_db():
                 FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
             )
         ''')
+        # Индексы для ускорения
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_to_delivered ON messages(to_id, delivered)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_channels_name_active ON channels(name, active)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_channel_messages_channel ON channel_messages(channel_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)')
+
+        # Системный пользователь (для уведомлений)
         cursor.execute("INSERT OR IGNORE INTO users (id, login, password_hash) VALUES (0, 'system', '')")
         db.commit()
 
+init_db()
+
+# ---------- Вспомогательные функции ----------
 def get_user_by_login(login):
     db = get_db()
     cursor = db.execute('SELECT * FROM users WHERE login = ?', (login,))
@@ -162,11 +193,15 @@ def get_undelivered_messages(user_id, from_id=None):
     return [{'from_id': m['from_id'], 'from_login': m['from_login'], 'content': m['content'], 'timestamp': m['timestamp']} for m in messages]
 
 def save_message(from_id, to_id, content):
+    if len(content) > 1000:
+        raise ValueError("Сообщение слишком длинное (макс. 1000 символов)")
     db = get_db()
     db.execute('''
         INSERT INTO messages (from_id, to_id, content, delivered) VALUES (?, ?, ?, 0)
     ''', (from_id, to_id, content))
     db.commit()
+    # Уведомление через WebSocket
+    socketio.emit(f'user_{to_id}_new_message', {'from': from_id}, room=f'user_{to_id}')
 
 def get_channel_by_name(name):
     db = get_db()
@@ -194,13 +229,21 @@ def unsubscribe_user(channel_id, user_id):
     db.commit()
 
 def add_channel_message(channel_id, user_id, content):
+    if len(content) > 1000:
+        raise ValueError("Сообщение слишком длинное (макс. 1000 символов)")
     db = get_db()
     cursor = db.cursor()
     cursor.execute('''
         INSERT INTO channel_messages (channel_id, user_id, content) VALUES (?, ?, ?)
     ''', (channel_id, user_id, content))
     db.commit()
-    return cursor.lastrowid
+    msg_id = cursor.lastrowid
+    # Уведомить всех подписчиков канала
+    cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ?', (channel_id,))
+    subscribers = [row['user_id'] for row in cursor.fetchall()]
+    for sub_id in subscribers:
+        socketio.emit(f'user_{sub_id}_new_channel_message', {'channel': channel_id}, room=f'user_{sub_id}')
+    return msg_id
 
 def get_channel_unread_count(user_id, channel_id):
     db = get_db()
@@ -251,12 +294,17 @@ def delete_channel(channel_id, owner_id):
         return False, "Канал не найден"
     if channel['owner_id'] != owner_id:
         return False, "Только владелец может удалить канал"
-    cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ? AND user_id != ?', (channel_id, owner_id))
+    # Удаляем канал (каскадно удалятся подписчики и сообщения)
+    db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))
+    # Уведомляем бывших подписчиков (их уже нет в таблице, но можно было бы сохранить список до удаления)
+    # Вместо этого отправим системное сообщение всем, кто был подписан (можно сохранить список заранее)
+    cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ?', (channel_id,))
     subscribers = [row['user_id'] for row in cursor.fetchall()]
-    db.execute('UPDATE channels SET active = 0 WHERE id = ?', (channel_id,))
+    db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))  # повтор для каскадного удаления
+    db.commit()
     for sub_id in subscribers:
         save_message(0, sub_id, f"Канал '{channel['name']}' был удален владельцем.")
-    db.commit()
+        socketio.emit(f'user_{sub_id}_new_message', {'from': 0}, room=f'user_{sub_id}')
     return True, "Канал удалён"
 
 def get_channels_unread_summary(user_id):
@@ -282,6 +330,7 @@ def is_online(user_id, minutes=2):
     delta = datetime.datetime.now() - last_seen
     return delta.total_seconds() < minutes * 60
 
+# ---------- Эндпоинты API ----------
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -291,10 +340,12 @@ def register():
     password = data['password']
     if not login or not password:
         return jsonify({'error': 'Логин и пароль не могут быть пустыми'}), 400
+    if len(login) > 50 or len(password) > 128:
+        return jsonify({'error': 'Логин или пароль слишком длинные'}), 400
     if get_user_by_login(login):
         return jsonify({'error': 'Пользователь с таким логином уже существует'}), 400
     user_id = create_user(login, password)
-    return jsonify({'id': user_id, 'login': login, 'message': 'Регистрация прошла успешно'}), 201
+    return jsonify({'result': [f'Регистрация успешна. Ваш ID: {user_id}'], 'error': None}), 201
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -308,10 +359,12 @@ def login():
         return jsonify({'error': 'Неверный логин или пароль'}), 401
     update_last_seen(user['id'])
     return jsonify({
-        'id': user['id'],
-        'login': user['login'],
-        'registered': user['registered'],
-        'message': 'Вход выполнен успешно'
+        'result': [{
+            'id': user['id'],
+            'login': user['login'],
+            'registered': user['registered']
+        }],
+        'error': None
     })
 
 @app.route('/unread_summary', methods=['GET'])
@@ -322,10 +375,10 @@ def unread_summary():
     user = get_user_by_id(user_id)
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
-    update_last_seen(user_id)
+    # Не обновляем last_seen здесь, чтобы не сбивать статистику онлайна
     personal = get_unread_summary(user_id)
     channels = get_channels_unread_summary(user_id)
-    return jsonify({'summary': personal, 'channels': channels})
+    return jsonify({'result': {'personal': personal, 'channels': channels}, 'error': None})
 
 @app.route('/read_messages', methods=['POST'])
 def read_messages():
@@ -337,17 +390,20 @@ def read_messages():
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
     from_id = data.get('from_id')
-    update_last_seen(user_id)
+    update_last_seen(user_id)  # действие пользователя
     messages = get_undelivered_messages(user_id, from_id)
-    return jsonify({'messages': messages})
+    return jsonify({'result': messages, 'error': None})
 
 @app.route('/channel/create', methods=['POST'])
+@limiter.limit("10 per minute")  # ограничение на создание каналов
 def channel_create():
     data = request.get_json()
     user_id = data.get('user_id')
     name = data.get('name', '').strip()
     if not user_id or not name:
         return jsonify({'error': 'Не указан user_id или название канала'}), 400
+    if len(name) > 100:
+        return jsonify({'error': 'Название канала слишком длинное'}), 400
     user = get_user_by_id(user_id)
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
@@ -359,7 +415,7 @@ def channel_create():
     channel_id = cursor.lastrowid
     subscribe_user(channel_id, user_id)
     db.commit()
-    return jsonify({'result': [f'Канал "{name}" создан. Вы автоматически подписаны.']})
+    return jsonify({'result': [f'Канал "{name}" создан. Вы автоматически подписаны.'], 'error': None})
 
 @app.route('/channel/subscribe', methods=['POST'])
 def channel_subscribe():
@@ -375,9 +431,9 @@ def channel_subscribe():
     if not channel:
         return jsonify({'error': 'Канал не найден'}), 404
     if is_subscriber(channel['id'], user_id):
-        return jsonify({'result': ['Вы уже подписаны на этот канал.']})
+        return jsonify({'result': ['Вы уже подписаны на этот канал.'], 'error': None})
     subscribe_user(channel['id'], user_id)
-    return jsonify({'result': [f'Вы подписались на канал "{channel_name}".']})
+    return jsonify({'result': [f'Вы подписались на канал "{channel_name}".'], 'error': None})
 
 @app.route('/channel/unsubscribe', methods=['POST'])
 def channel_unsubscribe():
@@ -393,11 +449,12 @@ def channel_unsubscribe():
     if not channel:
         return jsonify({'error': 'Канал не найден'}), 404
     if not is_subscriber(channel['id'], user_id):
-        return jsonify({'result': ['Вы не подписаны на этот канал.']})
+        return jsonify({'result': ['Вы не подписаны на этот канал.'], 'error': None})
     unsubscribe_user(channel['id'], user_id)
-    return jsonify({'result': [f'Вы отписались от канала "{channel_name}".']})
+    return jsonify({'result': [f'Вы отписались от канала "{channel_name}".'], 'error': None})
 
 @app.route('/channel/send', methods=['POST'])
+@limiter.limit("10 per minute")  # ограничение на отправку в каналы
 def channel_send():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -405,6 +462,8 @@ def channel_send():
     content = data.get('content', '').strip()
     if not user_id or not channel_name or not content:
         return jsonify({'error': 'Не указан user_id, название канала или сообщение'}), 400
+    if len(content) > 1000:
+        return jsonify({'error': 'Сообщение слишком длинное (макс. 1000 символов)'}), 400
     user = get_user_by_id(user_id)
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
@@ -413,8 +472,9 @@ def channel_send():
         return jsonify({'error': 'Канал не найден'}), 404
     if channel['owner_id'] != user_id:
         return jsonify({'error': 'Только владелец канала может отправлять сообщения'}), 403
+    update_last_seen(user_id)
     add_channel_message(channel['id'], user_id, content)
-    return jsonify({'result': [f'Сообщение отправлено в канал "{channel_name}".']})
+    return jsonify({'result': [f'Сообщение отправлено в канал "{channel_name}".'], 'error': None})
 
 @app.route('/channel/read', methods=['POST'])
 def channel_read():
@@ -431,6 +491,7 @@ def channel_read():
         return jsonify({'error': 'Канал не найден'}), 404
     if not is_subscriber(channel['id'], user_id):
         return jsonify({'error': 'Вы не подписаны на этот канал'}), 403
+    update_last_seen(user_id)
     messages = get_channel_messages(user_id, channel['id'])
     result_lines = [f'Новые сообщения из канала "{channel_name}":']
     if messages:
@@ -438,7 +499,7 @@ def channel_read():
             result_lines.append(f'[{msg["timestamp"]}] {msg["user_login"]}: {msg["content"]}')
     else:
         result_lines.append('Нет новых сообщений.')
-    return jsonify({'result': result_lines})
+    return jsonify({'result': result_lines, 'error': None})
 
 @app.route('/channel/delete', methods=['POST'])
 def channel_delete():
@@ -456,9 +517,10 @@ def channel_delete():
     ok, msg = delete_channel(channel['id'], user_id)
     if not ok:
         return jsonify({'error': msg}), 403
-    return jsonify({'result': [msg]})
+    return jsonify({'result': [msg], 'error': None})
 
 @app.route('/command', methods=['POST'])
+@limiter.limit("30 per minute")  # общее ограничение на команды
 def handle_command():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -467,7 +529,6 @@ def handle_command():
     user = get_user_by_id(user_id)
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
-    update_last_seen(user_id)
     command = data.get('command', '').strip().lower()
     args = data.get('args', {})
     result_lines = []
@@ -484,8 +545,12 @@ def handle_command():
                 if not recipient:
                     result_lines.append(f'Ошибка: пользователь с ID {to_id} не найден')
                 else:
-                    save_message(user_id, to_id, message)
-                    result_lines.append(f'Сообщение для {recipient["login"]} (ID {to_id}) отправлено')
+                    try:
+                        save_message(user_id, to_id, message)
+                        result_lines.append(f'Сообщение для {recipient["login"]} (ID {to_id}) отправлено')
+                        update_last_seen(user_id)
+                    except ValueError as e:
+                        result_lines.append(f'Ошибка: {e}')
     elif command == 'профиль':
         profile_id = args.get('profile_id')
         if not profile_id:
@@ -505,12 +570,36 @@ def handle_command():
         result_lines.append('понг')
     else:
         result_lines.append(f'Неизвестная команда: {command}')
-    return jsonify({'result': result_lines})
+    return jsonify({'result': result_lines, 'error': None})
 
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
 
+# ---------- WebSocket события ----------
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
+
+@socketio.on('subscribe')
+def handle_subscribe(data):
+    user_id = data.get('user_id')
+    if user_id:
+        room = f'user_{user_id}'
+        join_room(room)
+        print(f'User {user_id} subscribed to {room}')
+
+@socketio.on('unsubscribe')
+def handle_unsubscribe(data):
+    user_id = data.get('user_id')
+    if user_id:
+        room = f'user_{user_id}'
+        leave_room(room)
+        print(f'User {user_id} unsubscribed from {room}')
+
 if __name__ == '__main__':
-    init_db()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)  # debug=False в продакшене
