@@ -86,7 +86,7 @@
         .dos-screen {
             flex: 1;
             background: transparent;
-            color: #b0ffb0;  /* базовый зелёный, будет переопределён через style */
+            color: #b0ffb0;
             padding: 16px 20px;
             overflow-y: auto;
             font-size: 16px;
@@ -117,7 +117,7 @@
         }
         .output-line {
             margin-bottom: 4px;
-            color: inherit;  /* наследует цвет от .dos-screen */
+            color: inherit;
             border-bottom: 1px dotted #1e2f3a;
             padding-bottom: 2px;
         }
@@ -144,7 +144,7 @@
             background: transparent;
             border: none;
             border-bottom: 1px solid #2a3a4a;
-            color: inherit;  /* наследует цвет от .dos-screen */
+            color: inherit;
             font-family: inherit;
             font-size: 16px;
             line-height: 1.5;
@@ -221,6 +221,39 @@
             color: #ffcc99;
         }
 
+        /* Стили для аудиоплеера */
+        .audio-player {
+            display: inline-flex;
+            align-items: center;
+            background: #0f141a;
+            border: 1px solid #2a3a4a;
+            border-radius: 4px;
+            padding: 4px 8px;
+            margin: 2px 0;
+            color: #b0ffb0;
+            font-size: 14px;
+        }
+        .audio-player audio {
+            height: 30px;
+            width: 200px;
+            background: transparent;
+            filter: invert(1) hue-rotate(90deg); /* зелёная тема */
+            border-radius: 4px;
+        }
+        .audio-player audio::-webkit-media-controls-panel {
+            background: #0f141a;
+            border: 1px solid #2a3a4a;
+        }
+        .audio-player audio::-webkit-media-controls-current-time-display,
+        .audio-player audio::-webkit-media-controls-time-remaining-display {
+            color: #b0ffb0;
+            text-shadow: 0 0 3px #00ff80;
+        }
+        .audio-player span {
+            margin-left: 8px;
+            color: #6fcf97;
+        }
+
         #fileUpload {
             display: none;
         }
@@ -257,6 +290,9 @@
                 left: 10px;
                 right: 10px;
             }
+            .audio-player audio {
+                width: 150px;
+            }
         }
     </style>
     <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
@@ -269,7 +305,7 @@
             <input type="text" class="terminal-input" id="commandInput" autofocus placeholder="Введите команду">
             <div class="autocomplete-menu" id="autocompleteMenu"></div>
         </div>
-        <input type="file" id="fileUpload" accept="image/png, image/jpeg, image/gif, image/bmp, image/webp">
+        <input type="file" id="fileUpload" accept="image/png, image/jpeg, image/gif, image/bmp, image/webp, audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac">
     </div>
 
     <script>
@@ -295,14 +331,14 @@
             let lastUnreadHash = null;
             let autoReadEnabled = false;
             let pendingImageId = null;
-            let currentColor = 'зеленый';  // значение по умолчанию
+            let pendingAudioId = null;
+            let currentColor = 'зеленый';
 
             let currentCompletions = [];
             let selectedCompletionIndex = -1;
 
             let socket = null;
 
-            // Соответствие названий цветов и CSS-цветов
             const colorMap = {
                 'зеленый': '#b0ffb0',
                 'красный': '#ffb0b0',
@@ -314,14 +350,14 @@
             };
 
             const commandCategories = {
-                'Основные': ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'онлайн', 'каналы', 'цвет'],
+                'Основные': ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'онлайн', 'каналы', 'цвет', 'автопрочтение'],
                 'Каналы': ['канал создать', 'канал подписаться', 'канал отписаться', 'канал написать', 'канал прочитать', 'канал удалить'],
-                'Изображения': ['загрузить картинку', 'прочитать картинку', 'открепить', 'аватар']
+                'Медиа': ['загрузить картинку', 'загрузить музыку', 'прочитать картинку', 'прослушать музыку', 'открепить', 'аватар']
             };
 
             const initialLines = [
                 'Добро пожаловать в терминал.',
-                'Доступные команды: вход, регистрация, загрузить картинку, прочитать картинку, онлайн',
+                'Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн',
                 ''
             ];
             history.push(...initialLines);
@@ -340,8 +376,6 @@
                 const cssColor = colorMap[colorName] || '#b0ffb0';
                 outputArea.style.color = cssColor;
                 commandInput.style.color = cssColor;
-                // Также обновляем цвет текста в ранее выведенных строках через CSS-переменную, но они уже в DOM, 
-                // наследуют цвет от .dos-screen, поэтому достаточно изменить цвет родителя.
             }
 
             function updatePrompt() {
@@ -365,6 +399,9 @@
                         if (lineObj.imageId) {
                             linked += ` <span class="image-link" onclick="window.open('/image/${lineObj.imageId}')">[Изображение ID: ${lineObj.imageId}]</span>`;
                         }
+                        if (lineObj.audioId) {
+                            linked += ` <div class="audio-player"><audio controls src="/audio/${lineObj.audioId}"></audio> <span>Аудио ID: ${lineObj.audioId}</span></div>`;
+                        }
                         html += `<div class="output-line">${linked}</div>`;
                     } else {
                         let escaped = escapeHTML(lineObj);
@@ -377,9 +414,9 @@
                 updatePrompt();
             }
 
-            function appendHistory(text, imageId = null) {
-                if (imageId) {
-                    history.push({ text, imageId });
+            function appendHistory(text, imageId = null, audioId = null) {
+                if (imageId || audioId) {
+                    history.push({ text, imageId, audioId });
                 } else {
                     history.push(text);
                 }
@@ -416,11 +453,19 @@
                 });
                 socket.on(`user_${currentUserId}_new_message`, (data) => {
                     appendHistory(`📩 Новое личное сообщение от пользователя ID ${data.from}`);
-                    fetchUnreadSummary(true);
+                    if (autoReadEnabled) {
+                        autoReadAllPersonal();
+                    } else {
+                        fetchUnreadSummary(true);
+                    }
                 });
                 socket.on(`user_${currentUserId}_new_channel_message`, (data) => {
                     appendHistory(`📢 Новое сообщение в канале (ID канала ${data.channel})`);
-                    fetchUnreadSummary(true);
+                    if (autoReadEnabled) {
+                        autoReadAllChannels();
+                    } else {
+                        fetchUnreadSummary(true);
+                    }
                 });
             }
 
@@ -472,20 +517,7 @@
                                 appendHistory('Все сообщения прочитаны.');
                             }
                         } else {
-                            if (personal.length || channels.length) {
-                                if (autoReadEnabled) {
-                                    await autoReadAll(personal, channels);
-                                } else {
-                                    if (personal.length) {
-                                        appendHistory(`📩 Новые личные сообщения (${personal.length} отправителей)`);
-                                    }
-                                    if (channels.length) {
-                                        channels.forEach(ch => {
-                                            appendHistory(`📢 Канал "${ch.channel_name}": ${ch.unread_count} нов. сообщ.`);
-                                        });
-                                    }
-                                }
-                            }
+                            // silent режим: просто обновляем хеш, ничего не выводим
                         }
                     }
                     return { personal, channels };
@@ -495,36 +527,58 @@
                 }
             }
 
-            async function autoReadAll(personalList, channelsList) {
-                let personalCount = 0;
-                let channelsCount = 0;
-                if (personalList.length > 0) {
-                    try {
-                        const resp = await fetch(`${API_BASE}/read_messages`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ user_id: currentUserId })
-                        });
-                        if (resp.ok) {
-                            const data = await resp.json();
-                            personalCount = data.result ? data.result.length : 0;
+            // Автоматическое чтение всех личных сообщений с выводом
+            async function autoReadAllPersonal() {
+                if (!authenticated || !currentUserId) return;
+                try {
+                    const resp = await fetch(`${API_BASE}/read_messages`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId })
+                    });
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        const messages = data.result || [];
+                        if (messages.length) {
+                            appendHistory('📨 Автоматически прочитанные личные сообщения:');
+                            messages.forEach(msg => {
+                                let line = `[${msg.timestamp}] ${msg.from_login} (${msg.from_id}): ${msg.content}`;
+                                appendHistory(line, msg.image_id, msg.audio_id);
+                            });
                         }
-                    } catch (e) {}
+                    }
+                } catch (e) {
+                    console.error('autoReadAllPersonal error', e);
                 }
-                for (const ch of channelsList) {
-                    try {
+            }
+
+            // Автоматическое чтение всех каналов с выводом
+            async function autoReadAllChannels() {
+                if (!authenticated || !currentUserId) return;
+                // Получаем список каналов с непрочитанными
+                try {
+                    const summary = await fetchUnreadSummary(true);
+                    if (!summary) return;
+                    for (const ch of summary.channels) {
                         const resp = await fetch(`${API_BASE}/channel/read`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ user_id: currentUserId, channel_name: ch.channel_name })
                         });
                         if (resp.ok) {
-                            channelsCount += ch.unread_count;
+                            const data = await resp.json();
+                            // data.result — массив строк (уже форматированных)
+                            // но они не содержат image_id и audio_id отдельно, поэтому выводим как есть
+                            if (data.result && data.result.length > 1) { // первая строка — заголовок
+                                appendHistory(`📢 Канал "${ch.channel_name}":`);
+                                for (let i = 1; i < data.result.length; i++) {
+                                    appendHistory(data.result[i]);
+                                }
+                            }
                         }
-                    } catch (e) {}
-                }
-                if (personalCount > 0 || channelsCount > 0) {
-                    appendHistory(`📖 Автоматически прочитано: личных: ${personalCount}, каналов: ${channelsCount}`);
+                    }
+                } catch (e) {
+                    console.error('autoReadAllChannels error', e);
                 }
             }
 
@@ -547,7 +601,7 @@
                             }
                             messages.forEach(msg => {
                                 let line = `[${msg.timestamp}] ${msg.from_login} (${msg.from_id}): ${msg.content}`;
-                                appendHistory(line, msg.image_id);
+                                appendHistory(line, msg.image_id, msg.audio_id);
                             });
                         } else {
                             appendHistory('Нет личных сообщений для отображения.');
@@ -570,6 +624,8 @@
                     });
                     const data = await resp.json();
                     if (resp.ok && !data.error) {
+                        // data.result — массив строк, но image_id/audio_id не выделены отдельно
+                        // поэтому выводим как есть
                         data.result.forEach(line => appendHistory(line));
                         await fetchUnreadSummary(true);
                     } else {
@@ -634,12 +690,12 @@
                 }
             }
 
-            async function channelSend(name, message, imageId = null) {
+            async function channelSend(name, message, imageId = null, audioId = null) {
                 try {
                     const resp = await fetch(`${API_BASE}/channel/send`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ user_id: currentUserId, channel_name: name, content: message, image_id: imageId })
+                        body: JSON.stringify({ user_id: currentUserId, channel_name: name, content: message, image_id: imageId, audio_id: audioId })
                     });
                     const data = await resp.json();
                     if (resp.ok && !data.error) {
@@ -690,7 +746,7 @@
                     currentLogin = user.login;
                     autoReadEnabled = false;
                     pendingImageId = null;
-                    // Устанавливаем цвет из профиля
+                    pendingAudioId = null;
                     if (user.color_pref) {
                         setTextColor(user.color_pref);
                     }
@@ -742,10 +798,10 @@
                 }
             }
 
-            function uploadImage(file) {
+            function uploadFile(file) {
                 const formData = new FormData();
                 formData.append('user_id', currentUserId);
-                formData.append('image', file);
+                formData.append('image', file); // имя поля остаётся image для совместимости, сервер сам определит тип
 
                 fetch(`${API_BASE}/upload_image`, {
                     method: 'POST',
@@ -756,9 +812,15 @@
                     if (data.error) {
                         appendHistory(`Ошибка загрузки: ${data.error}`);
                     } else {
-                        const imageId = data.result.image_id;
-                        pendingImageId = imageId;
-                        appendHistory(`✅ Изображение загружено. ID: ${imageId}. Оно будет прикреплено к следующему отправленному сообщению.`);
+                        const mediaId = data.result.media_id;
+                        const type = data.result.type;
+                        if (type === 'image') {
+                            pendingImageId = mediaId;
+                            appendHistory(`✅ Изображение загружено. ID: ${mediaId}. Оно будет прикреплено к следующему отправленному сообщению.`);
+                        } else {
+                            pendingAudioId = mediaId;
+                            appendHistory(`🎵 Аудио загружено. ID: ${mediaId}. Оно будет прикреплено к следующему отправленному сообщению.`);
+                        }
                     }
                 })
                 .catch(err => {
@@ -851,12 +913,12 @@
 
             function getAllCommands() {
                 if (!authenticated) {
-                    return ['вход', 'регистрация', 'загрузить картинку', 'прочитать картинку', 'онлайн'];
+                    return ['вход', 'регистрация', 'загрузить картинку', 'загрузить музыку', 'прочитать картинку', 'прослушать музыку', 'онлайн'];
                 } else {
                     return [
                         'написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё',
-                        'помощь', 'выход', 'канал', 'автопрочтение', 'загрузить картинку', 'прочитать картинку',
-                        'открепить', 'онлайн', 'аватар', 'каналы', 'цвет',
+                        'помощь', 'выход', 'канал', 'автопрочтение', 'загрузить картинку', 'загрузить музыку',
+                        'прочитать картинку', 'прослушать музыку', 'открепить', 'онлайн', 'аватар', 'каналы', 'цвет',
                         'канал создать', 'канал подписаться', 'канал отписаться', 'канал написать', 'канал прочитать', 'канал удалить'
                     ];
                 }
@@ -871,7 +933,7 @@
                 for (let cmd of completions) {
                     let found = false;
                     for (let [cat, cmds] of Object.entries(commandCategories)) {
-                        if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && cmd !== 'загрузить картинку' && cmd !== 'прочитать картинку' && cmd !== 'открепить' && cmd !== 'аватар')) {
+                        if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && !cmd.startsWith('загрузить') && !cmd.startsWith('прочитать') && cmd !== 'открепить' && cmd !== 'аватар')) {
                             if (!categorized[cat]) categorized[cat] = [];
                             categorized[cat].push(cmd);
                             found = true;
@@ -986,14 +1048,21 @@
                         mode = 'awaiting_register_login';
                         appendHistory('Придумайте логин:');
                     } else if (command === 'загрузить' && args[0] === 'картинку') {
+                        fileInput.accept = 'image/png, image/jpeg, image/gif, image/bmp, image/webp';
+                        fileInput.click();
+                    } else if (command === 'загрузить' && args[0] === 'музыку') {
+                        fileInput.accept = 'audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac';
                         fileInput.click();
                     } else if (command === 'прочитать' && args[0] === 'картинку' && args[1]) {
                         const imageId = args[1];
                         window.open(`/image/${imageId}`, '_blank');
+                    } else if (command === 'прослушать' && args[0] === 'музыку' && args[1]) {
+                        const audioId = args[1];
+                        window.open(`/audio/${audioId}`, '_blank');
                     } else if (command === 'онлайн') {
                         fetchOnlineUsers();
                     } else {
-                        appendHistory('Неизвестная команда. Доступные: вход, регистрация, загрузить картинку, прочитать картинку [id], онлайн');
+                        appendHistory('Неизвестная команда. Доступные: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку [id], прослушать музыку [id], онлайн');
                     }
                     commandInput.value = '';
                     render();
@@ -1007,7 +1076,7 @@
                         const arg = args[0];
                         if (arg === 'вкл' || arg === 'on' || arg === '1' || arg === 'да') {
                             autoReadEnabled = true;
-                            appendHistory('Автоматическое прочтение включено.');
+                            appendHistory('Автоматическое прочтение включено. Новые сообщения будут сразу показываться.');
                         } else if (arg === 'выкл' || arg === 'off' || arg === '0' || arg === 'нет') {
                             autoReadEnabled = false;
                             appendHistory('Автоматическое прочтение выключено.');
@@ -1045,8 +1114,10 @@
                             chName = trimmedArgs.substring(0, spaceIndex).trim();
                             message = trimmedArgs.substring(spaceIndex + 1).trim();
                         }
-                        channelSend(chName, message, pendingImageId);
-                        if (pendingImageId) pendingImageId = null;
+                        // Если есть pending-медиа, прикрепляем
+                        channelSend(chName, message, pendingImageId, pendingAudioId);
+                        pendingImageId = null;
+                        pendingAudioId = null;
                     } else if (sub === 'прочитать') {
                         if (!subArgs) { appendHistory('Укажите название канала.'); return; }
                         channelRead(subArgs);
@@ -1064,8 +1135,9 @@
                 } else if (command === 'написать' && args.length >= 2) {
                     const toId = args[0];
                     const message = args.slice(1).join(' ');
-                    apiCommand('написать', { to_id: toId, message: message, image_id: pendingImageId });
-                    if (pendingImageId) pendingImageId = null;
+                    apiCommand('написать', { to_id: toId, message: message, image_id: pendingImageId, audio_id: pendingAudioId });
+                    pendingImageId = null;
+                    pendingAudioId = null;
                 } else if (command === 'профиль' && args.length >= 1) {
                     apiCommand('профиль', { profile_id: args[0] });
                 } else if (command === 'пинг' || command === 'ping') {
@@ -1087,20 +1159,29 @@
                     lastUnreadHash = null;
                     autoReadEnabled = false;
                     pendingImageId = null;
+                    pendingAudioId = null;
                     disconnectWebSocket();
                     appendHistory('Вы вышли из аккаунта.');
-                    appendHistory('Доступные команды: вход, регистрация, загрузить картинку, прочитать картинку, онлайн');
+                    appendHistory('Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн');
                 } else if (command === 'загрузить' && args[0] === 'картинку') {
+                    fileInput.accept = 'image/png, image/jpeg, image/gif, image/bmp, image/webp';
+                    fileInput.click();
+                } else if (command === 'загрузить' && args[0] === 'музыку') {
+                    fileInput.accept = 'audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac';
                     fileInput.click();
                 } else if (command === 'прочитать' && args[0] === 'картинку' && args[1]) {
                     const imageId = args[1];
                     window.open(`/image/${imageId}`, '_blank');
+                } else if (command === 'прослушать' && args[0] === 'музыку' && args[1]) {
+                    const audioId = args[1];
+                    window.open(`/audio/${audioId}`, '_blank');
                 } else if (command === 'открепить') {
-                    if (pendingImageId) {
+                    if (pendingImageId || pendingAudioId) {
                         pendingImageId = null;
-                        appendHistory('Изображение откреплено.');
+                        pendingAudioId = null;
+                        appendHistory('Медиа откреплено.');
                     } else {
-                        appendHistory('Нет прикреплённого изображения.');
+                        appendHistory('Нет прикреплённого медиа.');
                     }
                 } else if (command === 'онлайн') {
                     fetchOnlineUsers();
@@ -1129,17 +1210,19 @@
 
             function showHelp() {
                 appendHistory('Доступные команды:');
-                appendHistory('  написать [id] [сообщение]   - отправить личное сообщение (автоматически прикрепляет загруженную картинку)');
+                appendHistory('  написать [id] [сообщение]   - отправить личное сообщение (прикрепляет загруженные картинку/музыку)');
                 appendHistory('  профиль [id]                - просмотр профиля');
                 appendHistory('  непрочитанные                - список контактов с непрочитанными');
                 appendHistory('  прочитать [id]               - прочитать личные сообщения от пользователя');
                 appendHistory('  прочитать всё                - прочитать все непрочитанные личные');
                 appendHistory('  пинг                         - проверка связи');
                 appendHistory('  мойид                        - показать свой ID');
-                appendHistory('  автопрочтение [вкл|выкл]     - включить/выключить авто-прочтение');
+                appendHistory('  автопрочтение [вкл|выкл]     - включить/выключить авто-прочтение (с выводом)');
                 appendHistory('  загрузить картинку           - открыть проводник для выбора изображения');
+                appendHistory('  загрузить музыку             - открыть проводник для выбора аудио');
                 appendHistory('  прочитать картинку [id]      - открыть изображение');
-                appendHistory('  открепить                    - открепить текущее изображение');
+                appendHistory('  прослушать музыку [id]       - открыть аудио');
+                appendHistory('  открепить                    - открепить текущее медиа');
                 appendHistory('  онлайн                       - показать пользователей в сети');
                 appendHistory('  каналы                       - показать каналы, на которые вы подписаны');
                 appendHistory('  цвет [цвет]                  - изменить цвет текста (зеленый, красный, синий, желтый, оранжевый, розовый, голубой)');
@@ -1216,7 +1299,7 @@
                         for (let cmd of currentCompletions) {
                             let found = false;
                             for (let [cat, cmds] of Object.entries(commandCategories)) {
-                                if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && cmd !== 'загрузить картинку' && cmd !== 'прочитать картинку' && cmd !== 'открепить' && cmd !== 'аватар')) {
+                                if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && !cmd.startsWith('загрузить') && !cmd.startsWith('прочитать') && cmd !== 'открепить' && cmd !== 'аватар')) {
                                     if (!categorized[cat]) categorized[cat] = [];
                                     categorized[cat].push(cmd);
                                     found = true;
@@ -1242,7 +1325,7 @@
                         for (let cmd of currentCompletions) {
                             let found = false;
                             for (let [cat, cmds] of Object.entries(commandCategories)) {
-                                if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && cmd !== 'загрузить картинку' && cmd !== 'прочитать картинку' && cmd !== 'открепить' && cmd !== 'аватар')) {
+                                if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && !cmd.startsWith('загрузить') && !cmd.startsWith('прочитать') && cmd !== 'открепить' && cmd !== 'аватар')) {
                                     if (!categorized[cat]) categorized[cat] = [];
                                     categorized[cat].push(cmd);
                                     found = true;
@@ -1326,10 +1409,10 @@
                 const file = e.target.files[0];
                 if (file) {
                     if (!authenticated) {
-                        appendHistory('Ошибка: необходимо войти в систему для загрузки изображений.');
+                        appendHistory('Ошибка: необходимо войти в систему для загрузки файлов.');
                         return;
                     }
-                    uploadImage(file);
+                    uploadFile(file);
                 }
                 fileInput.value = '';
             });
