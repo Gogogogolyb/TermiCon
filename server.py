@@ -5,11 +5,10 @@ import os
 import uuid
 from flask import Flask, request, jsonify, g, send_from_directory
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.utils import secure_filename
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 app.config['SECRET_KEY'] = 'your-secret-key-here'  # Измените в продакшене!
@@ -377,6 +376,16 @@ def is_online(user_id, minutes=2):
     delta = datetime.datetime.now() - last_seen
     return delta.total_seconds() < minutes * 60
 
+def get_online_users(minutes=2):
+    db = get_db()
+    cutoff = datetime.datetime.now() - datetime.timedelta(minutes=minutes)
+    cursor = db.execute('''
+        SELECT id, login, last_seen FROM users
+        WHERE last_seen >= ? AND id != 0
+        ORDER BY last_seen DESC
+    ''', (cutoff.isoformat(),))
+    return [dict(row) for row in cursor.fetchall()]
+
 # ---------- Эндпоинты API ----------
 @app.route('/register', methods=['POST'])
 def register():
@@ -622,6 +631,12 @@ def handle_command():
     else:
         result_lines.append(f'Неизвестная команда: {command}')
     return jsonify({'result': result_lines, 'error': None})
+
+@app.route('/online_users', methods=['GET'])
+def online_users():
+    minutes = request.args.get('minutes', default=2, type=int)
+    users = get_online_users(minutes)
+    return jsonify({'result': users, 'error': None})
 
 @app.route('/upload_image', methods=['POST'])
 def upload_image():
