@@ -23,9 +23,9 @@
             width: 100%;
             height: 100%;
             background: rgba(8, 10, 15, 0.95);
-            border: none;                      /* убрана рамка */
+            border: none;
             border-radius: 12px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8); /* оставлена только внешняя тень */
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
             backdrop-filter: blur(2px);
             display: flex;
             flex-direction: column;
@@ -98,7 +98,7 @@
             user-select: text;
             scrollbar-width: thin;
             scrollbar-color: #4a5b6b #0f1217;
-            text-shadow: 0 0 3px #00ffff, 0 0 8px #006666; /* усиленное свечение */
+            text-shadow: 0 0 3px #00ffff, 0 0 8px #006666;
             -webkit-overflow-scrolling: touch;
         }
         .dos-screen::-webkit-scrollbar {
@@ -190,19 +190,19 @@
         .mobile-input {
             background: transparent;
             border: none;
-            border-bottom: 1px solid #2a3a4a;      /* линия ввода в стиле терминала */
+            border-bottom: 1px solid #2a3a4a;
             color: #d0e0e0;
             font-family: inherit;
             font-size: 16px;
             line-height: 1.5;
             width: 100%;
             outline: none;
-            caret-color: #8ae2b0;                   /* зелёный курсор */
-            padding: 4px 0;                          /* вертикальный отступ для линии */
+            caret-color: #8ae2b0;
+            padding: 4px 0;
             transition: border-color 0.2s;
         }
         .mobile-input:focus {
-            border-bottom-color: #6fcf97;            /* подсветка при фокусе */
+            border-bottom-color: #6fcf97;
         }
         .mobile-input::placeholder {
             color: #3a4a5a;
@@ -268,6 +268,7 @@
         (function() {
             // Определяем мобильность
             const isMobile = window.innerWidth < 768 || 'ontouchstart' in window;
+            console.log('isMobile:', isMobile); // отладка
 
             // Показываем нужный интерфейс
             const oldInputLine = document.getElementById('oldInputLine');
@@ -343,6 +344,9 @@
                 // Если старый интерфейс, обновляем строку ввода
                 if (!isMobile) {
                     updateOldInputLine();
+                } else {
+                    // Для мобильных тоже обновляем prompt (на всякий случай)
+                    updateNewPrompt();
                 }
             }
 
@@ -376,6 +380,7 @@
                 else if (mode === 'awaiting_register_password') promptStr = 'Придумайте пароль:';
                 else if (mode === 'awaiting_channel_delete_confirmation') promptStr = 'Подтверждение:';
                 newPrompt.textContent = promptStr;
+                console.log('updateNewPrompt:', promptStr, 'mode:', mode); // отладка
             }
 
             function appendHistory(text) {
@@ -775,6 +780,7 @@
             }
 
             function executeCommand(cmd) {
+                console.log('executeCommand:', cmd, 'mode:', mode); // отладка
                 const trimmed = cmd.trim();
                 if (trimmed === '' && mode === 'normal') return;
                 if (mode !== 'normal') {
