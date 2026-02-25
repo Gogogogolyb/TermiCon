@@ -1,6 +1,6 @@
 import sqlite3
 import datetime
-import os
+import random
 from flask import Flask, request, jsonify, g, send_from_directory
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -27,17 +27,15 @@ def init_db():
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
-        # Таблица пользователей
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY,
                 login TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # Таблица личных сообщений
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +48,6 @@ def init_db():
                 FOREIGN KEY(to_id) REFERENCES users(id)
             )
         ''')
-        # Таблица каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +58,6 @@ def init_db():
                 FOREIGN KEY(owner_id) REFERENCES users(id)
             )
         ''')
-        # Таблица подписчиков каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channel_subscribers (
                 channel_id INTEGER NOT NULL,
@@ -72,7 +68,6 @@ def init_db():
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         ''')
-        # Таблица сообщений каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channel_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +79,6 @@ def init_db():
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
         ''')
-        # Таблица статуса прочтения сообщений каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channel_read_status (
                 user_id INTEGER NOT NULL,
@@ -95,7 +89,6 @@ def init_db():
                 FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
             )
         ''')
-        # Системный пользователь для уведомлений (id=0)
         cursor.execute("INSERT OR IGNORE INTO users (id, login, password_hash) VALUES (0, 'system', '')")
         db.commit()
 
@@ -109,24 +102,29 @@ def get_user_by_id(user_id):
     cursor = db.execute('SELECT * FROM users WHERE id = ?', (user_id,))
     return cursor.fetchone()
 
+def generate_unique_id():
+    db = get_db()
+    while True:
+        new_id = random.randint(10000000, 99999999)
+        cursor = db.execute('SELECT id FROM users WHERE id = ?', (new_id,))
+        if not cursor.fetchone():
+            return new_id
+
 def create_user(login, password):
     password_hash = generate_password_hash(password)
     db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        INSERT INTO users (login, password_hash) VALUES (?, ?)
-    ''', (login, password_hash))
+    user_id = generate_unique_id()
+    db.execute('INSERT INTO users (id, login, password_hash) VALUES (?, ?, ?)',
+               (user_id, login, password_hash))
     db.commit()
-    return cursor.lastrowid
+    return user_id
 
 def update_last_seen(user_id):
     db = get_db()
     db.execute('UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE id = ?', (user_id,))
     db.commit()
 
-# --- Личные сообщения ---
 def get_unread_summary(user_id):
-    """Возвращает список отправителей и количество непрочитанных личных сообщений"""
     db = get_db()
     cursor = db.execute('''
         SELECT u.id as from_id, u.login as from_login, COUNT(*) as count
@@ -139,7 +137,6 @@ def get_unread_summary(user_id):
     return [dict(row) for row in cursor.fetchall()]
 
 def get_undelivered_messages(user_id, from_id=None):
-    """Возвращает непрочитанные личные сообщения и помечает их доставленными"""
     db = get_db()
     if from_id is None:
         cursor = db.execute('''
@@ -171,7 +168,6 @@ def save_message(from_id, to_id, content):
     ''', (from_id, to_id, content))
     db.commit()
 
-# --- Каналы ---
 def get_channel_by_name(name):
     db = get_db()
     cursor = db.execute('SELECT * FROM channels WHERE name = ? AND active = 1', (name,))
@@ -207,7 +203,6 @@ def add_channel_message(channel_id, user_id, content):
     return cursor.lastrowid
 
 def get_channel_unread_count(user_id, channel_id):
-    """Возвращает количество непрочитанных сообщений в канале для пользователя"""
     db = get_db()
     cursor = db.execute('''
         SELECT COUNT(*) as cnt
@@ -219,10 +214,8 @@ def get_channel_unread_count(user_id, channel_id):
     return row['cnt'] if row else 0
 
 def mark_channel_messages_read(user_id, channel_id, up_to_message_id=None):
-    """Отмечает сообщения канала как прочитанные до указанного ID (или все)"""
     db = get_db()
     if up_to_message_id is None:
-        # Получаем максимальный ID сообщения в канале
         cursor = db.execute('SELECT MAX(id) as max_id FROM channel_messages WHERE channel_id = ?', (channel_id,))
         row = cursor.fetchone()
         up_to_message_id = row['max_id'] if row and row['max_id'] else 0
@@ -234,14 +227,10 @@ def mark_channel_messages_read(user_id, channel_id, up_to_message_id=None):
     db.commit()
 
 def get_channel_messages(user_id, channel_id):
-    """Возвращает все непрочитанные сообщения канала и помечает их прочитанными"""
     db = get_db()
-    # Получаем последний прочитанный ID
     cursor = db.execute('SELECT last_read_message_id FROM channel_read_status WHERE user_id = ? AND channel_id = ?', (user_id, channel_id))
     row = cursor.fetchone()
     last_read = row['last_read_message_id'] if row else 0
-
-    # Получаем новые сообщения
     cursor = db.execute('''
         SELECT m.id, m.user_id, u.login as user_login, m.content, m.timestamp
         FROM channel_messages m
@@ -250,37 +239,27 @@ def get_channel_messages(user_id, channel_id):
         ORDER BY m.timestamp
     ''', (channel_id, last_read))
     messages = cursor.fetchall()
-
     if messages:
         max_id = max(m['id'] for m in messages)
         mark_channel_messages_read(user_id, channel_id, max_id)
     return [dict(m) for m in messages]
 
 def delete_channel(channel_id, owner_id):
-    """Удаляет канал (помечает неактивным) и уведомляет подписчиков"""
     db = get_db()
     channel = get_channel_by_id(channel_id)
     if not channel:
         return False, "Канал не найден"
     if channel['owner_id'] != owner_id:
         return False, "Только владелец может удалить канал"
-
-    # Получаем всех подписчиков (кроме владельца)
     cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ? AND user_id != ?', (channel_id, owner_id))
     subscribers = [row['user_id'] for row in cursor.fetchall()]
-
-    # Помечаем канал как неактивный
     db.execute('UPDATE channels SET active = 0 WHERE id = ?', (channel_id,))
-
-    # Отправляем системное сообщение каждому подписчику (как личное)
     for sub_id in subscribers:
         save_message(0, sub_id, f"Канал '{channel['name']}' был удален владельцем.")
-
     db.commit()
     return True, "Канал удалён"
 
 def get_channels_unread_summary(user_id):
-    """Возвращает список каналов с непрочитанными сообщениями для пользователя"""
     db = get_db()
     cursor = db.execute('''
         SELECT c.id as channel_id, c.name as channel_name, u.login as owner_login,
@@ -302,8 +281,6 @@ def is_online(user_id, minutes=2):
     last_seen = datetime.datetime.fromisoformat(user['last_seen'])
     delta = datetime.datetime.now() - last_seen
     return delta.total_seconds() < minutes * 60
-
-# --- API эндпоинты ---
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -364,8 +341,6 @@ def read_messages():
     messages = get_undelivered_messages(user_id, from_id)
     return jsonify({'messages': messages})
 
-# --- Эндпоинты для каналов ---
-
 @app.route('/channel/create', methods=['POST'])
 def channel_create():
     data = request.get_json()
@@ -382,7 +357,6 @@ def channel_create():
     cursor = db.cursor()
     cursor.execute('INSERT INTO channels (name, owner_id) VALUES (?, ?)', (name, user_id))
     channel_id = cursor.lastrowid
-    # Владелец автоматически подписывается
     subscribe_user(channel_id, user_id)
     db.commit()
     return jsonify({'result': [f'Канал "{name}" создан. Вы автоматически подписаны.']})
@@ -497,7 +471,6 @@ def handle_command():
     command = data.get('command', '').strip().lower()
     args = data.get('args', {})
     result_lines = []
-
     if command == 'написать':
         to_id = args.get('to_id')
         message = args.get('message', '').strip()
@@ -532,7 +505,6 @@ def handle_command():
         result_lines.append('понг')
     else:
         result_lines.append(f'Неизвестная команда: {command}')
-
     return jsonify({'result': result_lines})
 
 @app.route('/')
