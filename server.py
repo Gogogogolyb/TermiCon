@@ -1,16 +1,26 @@
 import sqlite3
 import datetime
 import random
+import os
+import uuid
 from flask import Flask, request, jsonify, g, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 app.config['SECRET_KEY'] = 'your-secret-key-here'  # Измените в продакшене!
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB макс. размер файла
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
+
 CORS(app)
+
+# Создаём папку для загрузок, если её нет
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Настройка SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -60,8 +70,10 @@ def init_db():
                 content TEXT NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 delivered BOOLEAN DEFAULT 0,
+                image_id INTEGER,
                 FOREIGN KEY(from_id) REFERENCES users(id),
-                FOREIGN KEY(to_id) REFERENCES users(id)
+                FOREIGN KEY(to_id) REFERENCES users(id),
+                FOREIGN KEY(image_id) REFERENCES images(id)
             )
         ''')
         # Каналы
@@ -94,8 +106,10 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 content TEXT NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                image_id INTEGER,
                 FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE,
-                FOREIGN KEY(user_id) REFERENCES users(id)
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(image_id) REFERENCES images(id)
             )
         ''')
         # Статус прочтения каналов
@@ -109,12 +123,24 @@ def init_db():
                 FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
             )
         ''')
+        # Изображения
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_filename TEXT NOT NULL,
+                stored_filename TEXT NOT NULL UNIQUE,
+                uploader_id INTEGER NOT NULL,
+                uploaded TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(uploader_id) REFERENCES users(id)
+            )
+        ''')
         # Индексы для ускорения
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_to_delivered ON messages(to_id, delivered)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_channels_name_active ON channels(name, active)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_channel_messages_channel ON channel_messages(channel_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_uploader ON images(uploader_id)')
 
         # Системный пользователь (для уведомлений)
         cursor.execute("INSERT OR IGNORE INTO users (id, login, password_hash) VALUES (0, 'system', '')")
@@ -123,6 +149,9 @@ def init_db():
 init_db()
 
 # ---------- Вспомогательные функции ----------
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 def get_user_by_login(login):
     db = get_db()
     cursor = db.execute('SELECT * FROM users WHERE login = ?', (login,))
@@ -171,7 +200,7 @@ def get_undelivered_messages(user_id, from_id=None):
     db = get_db()
     if from_id is None:
         cursor = db.execute('''
-            SELECT m.id, m.from_id, m.content, m.timestamp, u.login as from_login
+            SELECT m.id, m.from_id, m.content, m.timestamp, u.login as from_login, m.image_id
             FROM messages m
             JOIN users u ON m.from_id = u.id
             WHERE m.to_id = ? AND m.delivered = 0
@@ -179,7 +208,7 @@ def get_undelivered_messages(user_id, from_id=None):
         ''', (user_id,))
     else:
         cursor = db.execute('''
-            SELECT m.id, m.from_id, m.content, m.timestamp, u.login as from_login
+            SELECT m.id, m.from_id, m.content, m.timestamp, u.login as from_login, m.image_id
             FROM messages m
             JOIN users u ON m.from_id = u.id
             WHERE m.to_id = ? AND m.from_id = ? AND m.delivered = 0
@@ -190,15 +219,25 @@ def get_undelivered_messages(user_id, from_id=None):
         ids = [m['id'] for m in messages]
         db.execute('UPDATE messages SET delivered = 1 WHERE id IN ({})'.format(','.join('?' * len(ids))), ids)
         db.commit()
-    return [{'from_id': m['from_id'], 'from_login': m['from_login'], 'content': m['content'], 'timestamp': m['timestamp']} for m in messages]
+    result = []
+    for m in messages:
+        msg = {
+            'from_id': m['from_id'],
+            'from_login': m['from_login'],
+            'content': m['content'],
+            'timestamp': m['timestamp'],
+            'image_id': m['image_id']
+        }
+        result.append(msg)
+    return result
 
-def save_message(from_id, to_id, content):
+def save_message(from_id, to_id, content, image_id=None):
     if len(content) > 1000:
         raise ValueError("Сообщение слишком длинное (макс. 1000 символов)")
     db = get_db()
     db.execute('''
-        INSERT INTO messages (from_id, to_id, content, delivered) VALUES (?, ?, ?, 0)
-    ''', (from_id, to_id, content))
+        INSERT INTO messages (from_id, to_id, content, delivered, image_id) VALUES (?, ?, ?, 0, ?)
+    ''', (from_id, to_id, content, image_id))
     db.commit()
     # Уведомление через WebSocket
     socketio.emit(f'user_{to_id}_new_message', {'from': from_id}, room=f'user_{to_id}')
@@ -228,14 +267,14 @@ def unsubscribe_user(channel_id, user_id):
     db.execute('DELETE FROM channel_subscribers WHERE channel_id = ? AND user_id = ?', (channel_id, user_id))
     db.commit()
 
-def add_channel_message(channel_id, user_id, content):
+def add_channel_message(channel_id, user_id, content, image_id=None):
     if len(content) > 1000:
         raise ValueError("Сообщение слишком длинное (макс. 1000 символов)")
     db = get_db()
     cursor = db.cursor()
     cursor.execute('''
-        INSERT INTO channel_messages (channel_id, user_id, content) VALUES (?, ?, ?)
-    ''', (channel_id, user_id, content))
+        INSERT INTO channel_messages (channel_id, user_id, content, image_id) VALUES (?, ?, ?, ?)
+    ''', (channel_id, user_id, content, image_id))
     db.commit()
     msg_id = cursor.lastrowid
     # Уведомить всех подписчиков канала
@@ -275,7 +314,7 @@ def get_channel_messages(user_id, channel_id):
     row = cursor.fetchone()
     last_read = row['last_read_message_id'] if row else 0
     cursor = db.execute('''
-        SELECT m.id, m.user_id, u.login as user_login, m.content, m.timestamp
+        SELECT m.id, m.user_id, u.login as user_login, m.content, m.timestamp, m.image_id
         FROM channel_messages m
         JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.id > ?
@@ -285,7 +324,17 @@ def get_channel_messages(user_id, channel_id):
     if messages:
         max_id = max(m['id'] for m in messages)
         mark_channel_messages_read(user_id, channel_id, max_id)
-    return [dict(m) for m in messages]
+    result = []
+    for m in messages:
+        result.append({
+            'id': m['id'],
+            'user_id': m['user_id'],
+            'user_login': m['user_login'],
+            'content': m['content'],
+            'timestamp': m['timestamp'],
+            'image_id': m['image_id']
+        })
+    return result
 
 def delete_channel(channel_id, owner_id):
     db = get_db()
@@ -294,13 +343,11 @@ def delete_channel(channel_id, owner_id):
         return False, "Канал не найден"
     if channel['owner_id'] != owner_id:
         return False, "Только владелец может удалить канал"
-    # Удаляем канал (каскадно удалятся подписчики и сообщения)
-    db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))
-    # Уведомляем бывших подписчиков (их уже нет в таблице, но можно было бы сохранить список до удаления)
-    # Вместо этого отправим системное сообщение всем, кто был подписан (можно сохранить список заранее)
+    # Получаем подписчиков до удаления
     cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ?', (channel_id,))
     subscribers = [row['user_id'] for row in cursor.fetchall()]
-    db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))  # повтор для каскадного удаления
+    # Удаляем канал (каскадно удалятся подписчики и сообщения)
+    db.execute('DELETE FROM channels WHERE id = ?', (channel_id,))
     db.commit()
     for sub_id in subscribers:
         save_message(0, sub_id, f"Канал '{channel['name']}' был удален владельцем.")
@@ -375,7 +422,6 @@ def unread_summary():
     user = get_user_by_id(user_id)
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
-    # Не обновляем last_seen здесь, чтобы не сбивать статистику онлайна
     personal = get_unread_summary(user_id)
     channels = get_channels_unread_summary(user_id)
     return jsonify({'result': {'personal': personal, 'channels': channels}, 'error': None})
@@ -395,7 +441,7 @@ def read_messages():
     return jsonify({'result': messages, 'error': None})
 
 @app.route('/channel/create', methods=['POST'])
-@limiter.limit("10 per minute")  # ограничение на создание каналов
+@limiter.limit("10 per minute")
 def channel_create():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -454,15 +500,16 @@ def channel_unsubscribe():
     return jsonify({'result': [f'Вы отписались от канала "{channel_name}".'], 'error': None})
 
 @app.route('/channel/send', methods=['POST'])
-@limiter.limit("10 per minute")  # ограничение на отправку в каналы
+@limiter.limit("10 per minute")
 def channel_send():
     data = request.get_json()
     user_id = data.get('user_id')
     channel_name = data.get('channel_name', '').strip()
     content = data.get('content', '').strip()
-    if not user_id or not channel_name or not content:
-        return jsonify({'error': 'Не указан user_id, название канала или сообщение'}), 400
-    if len(content) > 1000:
+    image_id = data.get('image_id')  # может быть None
+    if not user_id or not channel_name or (not content and not image_id):
+        return jsonify({'error': 'Не указан user_id, название канала или сообщение/изображение'}), 400
+    if content and len(content) > 1000:
         return jsonify({'error': 'Сообщение слишком длинное (макс. 1000 символов)'}), 400
     user = get_user_by_id(user_id)
     if not user:
@@ -473,7 +520,7 @@ def channel_send():
     if channel['owner_id'] != user_id:
         return jsonify({'error': 'Только владелец канала может отправлять сообщения'}), 403
     update_last_seen(user_id)
-    add_channel_message(channel['id'], user_id, content)
+    add_channel_message(channel['id'], user_id, content or '', image_id)
     return jsonify({'result': [f'Сообщение отправлено в канал "{channel_name}".'], 'error': None})
 
 @app.route('/channel/read', methods=['POST'])
@@ -496,7 +543,10 @@ def channel_read():
     result_lines = [f'Новые сообщения из канала "{channel_name}":']
     if messages:
         for msg in messages:
-            result_lines.append(f'[{msg["timestamp"]}] {msg["user_login"]}: {msg["content"]}')
+            line = f'[{msg["timestamp"]}] {msg["user_login"]}: {msg["content"]}'
+            if msg['image_id']:
+                line += f' [Изображение ID: {msg["image_id"]}]'
+            result_lines.append(line)
     else:
         result_lines.append('Нет новых сообщений.')
     return jsonify({'result': result_lines, 'error': None})
@@ -520,7 +570,7 @@ def channel_delete():
     return jsonify({'result': [msg], 'error': None})
 
 @app.route('/command', methods=['POST'])
-@limiter.limit("30 per minute")  # общее ограничение на команды
+@limiter.limit("30 per minute")
 def handle_command():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -535,8 +585,9 @@ def handle_command():
     if command == 'написать':
         to_id = args.get('to_id')
         message = args.get('message', '').strip()
-        if not to_id or not message:
-            result_lines.append('Ошибка: укажите ID получателя и сообщение.')
+        image_id = args.get('image_id')
+        if not to_id or (not message and not image_id):
+            result_lines.append('Ошибка: укажите ID получателя и сообщение или изображение.')
         else:
             if int(to_id) == user_id:
                 result_lines.append('Ошибка: нельзя отправить сообщение самому себе.')
@@ -546,7 +597,7 @@ def handle_command():
                     result_lines.append(f'Ошибка: пользователь с ID {to_id} не найден')
                 else:
                     try:
-                        save_message(user_id, to_id, message)
+                        save_message(user_id, to_id, message or '', image_id)
                         result_lines.append(f'Сообщение для {recipient["login"]} (ID {to_id}) отправлено')
                         update_last_seen(user_id)
                     except ValueError as e:
@@ -571,6 +622,45 @@ def handle_command():
     else:
         result_lines.append(f'Неизвестная команда: {command}')
     return jsonify({'result': result_lines, 'error': None})
+
+@app.route('/upload_image', methods=['POST'])
+def upload_image():
+    user_id = request.form.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Не указан user_id'}), 400
+    user = get_user_by_id(user_id)
+    if not user:
+        return jsonify({'error': 'Пользователь не найден'}), 404
+    if 'image' not in request.files:
+        return jsonify({'error': 'Файл не загружен'}), 400
+    file = request.files['image']
+    if file.filename == '':
+        return jsonify({'error': 'Файл не выбран'}), 400
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'Недопустимый тип файла. Разрешены: png, jpg, jpeg, gif, bmp, webp'}), 400
+    # Генерируем уникальное имя
+    ext = file.filename.rsplit('.', 1)[1].lower()
+    stored_filename = f"{uuid.uuid4().hex}.{ext}"
+    file.save(os.path.join(app.config['UPLOAD_FOLDER'], stored_filename))
+    # Сохраняем в БД
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute('''
+        INSERT INTO images (original_filename, stored_filename, uploader_id)
+        VALUES (?, ?, ?)
+    ''', (file.filename, stored_filename, user_id))
+    db.commit()
+    image_id = cursor.lastrowid
+    return jsonify({'result': {'image_id': image_id}, 'error': None})
+
+@app.route('/image/<int:image_id>')
+def get_image(image_id):
+    db = get_db()
+    cursor = db.execute('SELECT stored_filename FROM images WHERE id = ?', (image_id,))
+    row = cursor.fetchone()
+    if not row:
+        return 'Изображение не найдено', 404
+    return send_from_directory(app.config['UPLOAD_FOLDER'], row['stored_filename'])
 
 @app.route('/')
 def index():
@@ -602,4 +692,4 @@ def handle_unsubscribe(data):
         print(f'User {user_id} unsubscribed from {room}')
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)  # debug=False в продакшене
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
