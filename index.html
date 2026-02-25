@@ -88,7 +88,7 @@
         .dos-screen {
             flex: 1;
             background: transparent;
-            color: #d0e0e0;
+            color: #b0ffb0; /* более зелёный текст */
             padding: 16px 20px;
             overflow-y: auto;
             font-size: 16px;
@@ -99,7 +99,7 @@
             user-select: text;
             scrollbar-width: thin;
             scrollbar-color: #4a5b6b #0f1217;
-            text-shadow: 0 0 3px #00ffff, 0 0 8px #006666;
+            text-shadow: 0 0 5px #00ff80, 0 0 12px #00cc66; /* усиленное зелёное свечение */
             -webkit-overflow-scrolling: touch;
         }
         .dos-screen::-webkit-scrollbar {
@@ -119,7 +119,7 @@
         }
         .output-line {
             margin-bottom: 4px;
-            color: #c0d0d0;
+            color: #b0ffb0;
             border-bottom: 1px dotted #1e2f3a;
             padding-bottom: 2px;
         }
@@ -133,6 +133,8 @@
             border-top: 1px solid #2a3a4a;
             box-shadow: 0 -5px 15px rgba(0, 255, 255, 0.1);
             font-family: 'Courier New', Courier, monospace;
+            position: relative;
+            z-index: 5;
         }
         .prompt {
             color: #6fcf97;
@@ -145,7 +147,7 @@
             background: transparent;
             border: none;
             border-bottom: 1px solid #2a3a4a;
-            color: #d0e0e0;
+            color: #b0ffb0;
             font-family: inherit;
             font-size: 16px;
             line-height: 1.5;
@@ -162,6 +164,46 @@
             color: #3a4a5a;
             font-style: italic;
             opacity: 0.8;
+        }
+
+        /* Стилизованное меню автодополнения */
+        .autocomplete-menu {
+            position: absolute;
+            bottom: 100%; /* над строкой ввода */
+            left: 20px;
+            right: 20px;
+            background: #0a0f14;
+            border: 1px solid #2a3a4a;
+            border-radius: 6px 6px 0 0;
+            box-shadow: 0 -5px 20px rgba(0, 255, 255, 0.2);
+            font-family: 'Courier New', Courier, monospace;
+            color: #b0ffb0;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 10;
+            display: none;
+            padding: 4px 0;
+        }
+        .autocomplete-menu.visible {
+            display: block;
+        }
+        .autocomplete-item {
+            padding: 6px 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            text-shadow: 0 0 3px #00ff80;
+            border-left: 3px solid transparent;
+            transition: all 0.1s;
+        }
+        .autocomplete-item:hover,
+        .autocomplete-item.selected {
+            background: #1a2a33;
+            border-left-color: #6fcf97;
+            color: #ffffff;
+            text-shadow: 0 0 8px #00ff80;
+        }
+        .autocomplete-item.selected {
+            background: #1f2f38;
         }
 
         /* Ссылки на изображения */
@@ -207,6 +249,10 @@
                 background: radial-gradient(circle at 50% 50%, rgba(0, 40, 40, 0.1) 0%, transparent 80%);
                 box-shadow: inset 0 0 30px rgba(0, 20, 20, 0.3);
             }
+            .autocomplete-menu {
+                left: 10px;
+                right: 10px;
+            }
         }
     </style>
     <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
@@ -218,6 +264,8 @@
         <div class="input-line">
             <span class="prompt" id="prompt"></span>
             <input type="text" class="terminal-input" id="commandInput" autofocus placeholder="Введите команду">
+            <!-- Меню автодополнения -->
+            <div class="autocomplete-menu" id="autocompleteMenu"></div>
         </div>
         <!-- Скрытый input для загрузки изображений -->
         <input type="file" id="fileUpload" accept="image/png, image/jpeg, image/gif, image/bmp, image/webp">
@@ -233,6 +281,7 @@
             const promptSpan = document.getElementById('prompt');
             const commandInput = document.getElementById('commandInput');
             const fileInput = document.getElementById('fileUpload');
+            const autocompleteMenu = document.getElementById('autocompleteMenu');
 
             // Состояние приложения
             let history = [];                 // массив строк для вывода
@@ -249,6 +298,11 @@
             let autoReadEnabled = false;
             let pendingImageId = null;          // ID последней загруженной картинки для прикрепления
 
+            // Для автодополнения
+            let currentCompletions = [];        // текущий список вариантов
+            let selectedCompletionIndex = -1;    // выбранный индекс
+            let tabPressed = false;               // флаг, что нажат Tab
+
             // WebSocket
             let socket = null;
 
@@ -262,6 +316,7 @@
                 '  загрузить картинку  - открыть проводник для выбора изображения',
                 '  прочитать картинку [id] - открыть изображение',
                 '  открепить           - открепить ранее загруженную картинку',
+                '  онлайн              - показать пользователей в сети',
                 '----------------------------------------------',
                 ''
             ];
@@ -275,14 +330,6 @@
             function linkify(text) {
                 const urlPattern = /(https?:\/\/[^\s]+)/g;
                 return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
-            }
-
-            function formatMessageWithImage(line, imageId) {
-                // Добавляет ссылку на изображение к строке сообщения
-                if (imageId) {
-                    return line + ` <span class="image-link" onclick="window.open('/image/${imageId}')">[Изображение ID: ${imageId}]</span>`;
-                }
-                return line;
             }
 
             function updatePrompt() {
@@ -301,7 +348,6 @@
                 // Отрисовка истории
                 let html = '';
                 for (let lineObj of history) {
-                    // Если строка — объект с полями text и imageId, форматируем специально
                     if (typeof lineObj === 'object' && lineObj.text !== undefined) {
                         let escaped = escapeHTML(lineObj.text);
                         let linked = linkify(escaped);
@@ -310,7 +356,6 @@
                         }
                         html += `<div class="output-line">${linked}</div>`;
                     } else {
-                        // Обычная строка
                         let escaped = escapeHTML(lineObj);
                         let linked = linkify(escaped);
                         html += `<div class="output-line">${linked}</div>`;
@@ -323,7 +368,6 @@
                 updatePrompt();
             }
 
-            // Перегружаем appendHistory для поддержки объектов
             function appendHistory(text, imageId = null) {
                 if (imageId) {
                     history.push({ text, imageId });
@@ -346,7 +390,9 @@
             function connectWebSocket() {
                 if (socket && socket.connected) return;
                 socket = io(API_BASE || window.location.origin, {
-                    transports: ['websocket', 'polling']
+                    transports: ['websocket', 'polling'],
+                    reconnection: true,
+                    reconnectionAttempts: 5
                 });
                 socket.on('connect', () => {
                     console.log('WebSocket connected');
@@ -360,6 +406,7 @@
                 socket.on('connect_error', (err) => {
                     console.error('WebSocket connection error:', err);
                 });
+                // События новых сообщений
                 socket.on(`user_${currentUserId}_new_message`, (data) => {
                     appendHistory(`📩 Новое личное сообщение от пользователя ID ${data.from}`);
                     fetchUnreadSummary(true);
@@ -517,8 +564,6 @@
                     });
                     const data = await resp.json();
                     if (resp.ok && !data.error) {
-                        // data.result — массив строк, но они не содержат image_id отдельно, поэтому выводим как есть
-                        // В идеале надо переделать сервер, чтобы возвращал объекты, но пока так
                         data.result.forEach(line => appendHistory(line));
                         await fetchUnreadSummary(true);
                     } else {
@@ -712,43 +757,154 @@
                 });
             }
 
-            // --- Обработка команд ---
+            // --- Получение списка онлайн пользователей ---
+            async function fetchOnlineUsers() {
+                if (!authenticated) {
+                    appendHistory('Ошибка: необходимо войти в систему.');
+                    return;
+                }
+                try {
+                    const resp = await fetch(`${API_BASE}/online_users`);
+                    if (!resp.ok) {
+                        appendHistory(`Ошибка HTTP ${resp.status}`);
+                        return;
+                    }
+                    const data = await resp.json();
+                    if (data.error) {
+                        appendHistory(`Ошибка: ${data.error}`);
+                        return;
+                    }
+                    const users = data.result;
+                    if (users.length === 0) {
+                        appendHistory('Нет пользователей в сети.');
+                    } else {
+                        appendHistory('Пользователи в сети:');
+                        users.forEach(u => {
+                            appendHistory(`  ${u.login} (ID: ${u.id}) — последняя активность: ${u.last_seen}`);
+                        });
+                    }
+                } catch (err) {
+                    appendHistory(`Ошибка соединения: ${err.message}`);
+                }
+            }
+
+            // --- Автодополнение ---
             function getCompletionList(prefix, prevWord) {
                 if (!authenticated) {
-                    return ['вход', 'регистрация', 'загрузить картинку', 'прочитать картинку'].filter(cmd => cmd.startsWith(prefix));
+                    return ['вход', 'регистрация', 'загрузить картинку', 'прочитать картинку', 'онлайн'].filter(cmd => cmd.startsWith(prefix));
                 } else {
                     if (prevWord === 'канал') {
                         return ['создать', 'подписаться', 'отписаться', 'написать', 'прочитать', 'удалить'].filter(cmd => cmd.startsWith(prefix));
                     } else {
-                        return ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'канал', 'автопрочтение', 'загрузить картинку', 'прочитать картинку', 'открепить'].filter(cmd => cmd.startsWith(prefix));
+                        return ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'канал', 'автопрочтение', 'загрузить картинку', 'прочитать картинку', 'открепить', 'онлайн'].filter(cmd => cmd.startsWith(prefix));
                     }
                 }
             }
 
-            function handleTab(currentValue, cursorPosition, setValueCallback) {
-                if (mode !== 'normal') return;
-                const beforeCursor = currentValue.slice(0, cursorPosition);
-                const afterCursor = currentValue.slice(cursorPosition);
+            function showAutocomplete(completions) {
+                if (!completions || completions.length === 0) {
+                    hideAutocomplete();
+                    return;
+                }
+                currentCompletions = completions;
+                selectedCompletionIndex = 0;
+                renderAutocomplete();
+                autocompleteMenu.classList.add('visible');
+            }
+
+            function hideAutocomplete() {
+                autocompleteMenu.classList.remove('visible');
+                currentCompletions = [];
+                selectedCompletionIndex = -1;
+            }
+
+            function renderAutocomplete() {
+                let html = '';
+                currentCompletions.forEach((item, index) => {
+                    const selectedClass = index === selectedCompletionIndex ? 'selected' : '';
+                    html += `<div class="autocomplete-item ${selectedClass}" data-index="${index}">${item}</div>`;
+                });
+                autocompleteMenu.innerHTML = html;
+                // Добавляем обработчики кликов
+                document.querySelectorAll('.autocomplete-item').forEach(el => {
+                    el.addEventListener('click', (e) => {
+                        const index = parseInt(e.target.dataset.index);
+                        if (!isNaN(index) && currentCompletions[index]) {
+                            completeWith(currentCompletions[index]);
+                        }
+                    });
+                });
+            }
+
+            function completeWith(completion) {
+                if (!completion) return;
+                const input = commandInput;
+                const cursorPos = input.selectionStart;
+                const beforeCursor = input.value.slice(0, cursorPos);
+                const afterCursor = input.value.slice(cursorPos);
+                const lastSpaceBefore = beforeCursor.lastIndexOf(' ');
+                const startOfWord = lastSpaceBefore === -1 ? 0 : lastSpaceBefore + 1;
+                const newBefore = beforeCursor.slice(0, startOfWord) + completion;
+                const newValue = newBefore + afterCursor;
+                input.value = newValue;
+                input.setSelectionRange(newBefore.length, newBefore.length);
+                hideAutocomplete();
+            }
+
+            function handleTab() {
+                if (mode !== 'normal') {
+                    hideAutocomplete();
+                    return;
+                }
+                const input = commandInput;
+                const cursorPos = input.selectionStart;
+                const beforeCursor = input.value.slice(0, cursorPos);
+                const afterCursor = input.value.slice(cursorPos);
                 const lastSpaceBefore = beforeCursor.lastIndexOf(' ');
                 const startOfWord = lastSpaceBefore === -1 ? 0 : lastSpaceBefore + 1;
                 const wordPrefix = beforeCursor.slice(startOfWord);
                 const beforeCurrent = beforeCursor.slice(0, startOfWord).trim();
                 const prevWord = beforeCurrent.split(' ').pop() || '';
                 const completions = getCompletionList(wordPrefix, prevWord);
-                if (completions.length === 0) return;
-                if (completions.length === 1) {
-                    const completion = completions[0];
-                    const newBefore = beforeCursor.slice(0, startOfWord) + completion;
-                    const newValue = newBefore + afterCursor;
-                    setValueCallback(newValue, newBefore.length);
+
+                if (completions.length === 0) {
+                    hideAutocomplete();
+                    return;
+                }
+
+                if (!autocompleteMenu.classList.contains('visible')) {
+                    // Показываем меню
+                    showAutocomplete(completions);
                 } else {
-                    appendHistory('Возможные варианты: ' + completions.join(', '));
+                    // Меню уже открыто — перемещаемся по пунктам или выбираем
+                    if (completions.length > 0) {
+                        if (selectedCompletionIndex < completions.length - 1) {
+                            selectedCompletionIndex++;
+                        } else {
+                            selectedCompletionIndex = 0; // зацикливаем
+                        }
+                        renderAutocomplete();
+                    } else {
+                        hideAutocomplete();
+                    }
                 }
             }
 
+            // --- Обработка команд ---
             function executeCommand(cmd) {
                 const trimmed = cmd.trim();
                 if (trimmed === '' && mode === 'normal') return;
+
+                // Если меню открыто и есть выбранный пункт, подставляем его и закрываем
+                if (autocompleteMenu.classList.contains('visible') && selectedCompletionIndex !== -1) {
+                    const selected = currentCompletions[selectedCompletionIndex];
+                    if (selected) {
+                        completeWith(selected);
+                    }
+                    return;
+                }
+
+                hideAutocomplete();
 
                 // Если находимся в специальном режиме (ожидание ввода)
                 if (mode !== 'normal') {
@@ -777,12 +933,14 @@
                         mode = 'awaiting_register_login';
                         appendHistory('Придумайте логин:');
                     } else if (command === 'загрузить' && args[0] === 'картинку') {
-                        fileInput.click();  // открываем проводник
+                        fileInput.click();
                     } else if (command === 'прочитать' && args[0] === 'картинку' && args[1]) {
                         const imageId = args[1];
                         window.open(`/image/${imageId}`, '_blank');
+                    } else if (command === 'онлайн') {
+                        fetchOnlineUsers();
                     } else {
-                        appendHistory('Неизвестная команда. Доступные: вход, регистрация, загрузить картинку, прочитать картинку [id]');
+                        appendHistory('Неизвестная команда. Доступные: вход, регистрация, загрузить картинку, прочитать картинку [id], онлайн');
                     }
                     commandInput.value = '';
                     render();
@@ -835,11 +993,8 @@
                             chName = trimmedArgs.substring(0, spaceIndex).trim();
                             message = trimmedArgs.substring(spaceIndex + 1).trim();
                         }
-                        // Если есть pendingImageId, добавляем его
                         channelSend(chName, message, pendingImageId);
-                        if (pendingImageId) {
-                            pendingImageId = null; // сбрасываем после отправки
-                        }
+                        if (pendingImageId) pendingImageId = null;
                     } else if (sub === 'прочитать') {
                         if (!subArgs) { appendHistory('Укажите название канала.'); return; }
                         channelRead(subArgs);
@@ -857,11 +1012,8 @@
                 } else if (command === 'написать' && args.length >= 2) {
                     const toId = args[0];
                     const message = args.slice(1).join(' ');
-                    // Отправляем с прикреплённым изображением, если есть
                     apiCommand('написать', { to_id: toId, message: message, image_id: pendingImageId });
-                    if (pendingImageId) {
-                        pendingImageId = null; // сбрасываем
-                    }
+                    if (pendingImageId) pendingImageId = null;
                 } else if (command === 'профиль' && args.length >= 1) {
                     apiCommand('профиль', { profile_id: args[0] });
                 } else if (command === 'пинг' || command === 'ping') {
@@ -885,7 +1037,7 @@
                     pendingImageId = null;
                     disconnectWebSocket();
                     appendHistory('Вы вышли из аккаунта.');
-                    appendHistory('Доступные команды: вход, регистрация, загрузить картинку, прочитать картинку');
+                    appendHistory('Доступные команды: вход, регистрация, загрузить картинку, прочитать картинку, онлайн');
                 } else if (command === 'загрузить' && args[0] === 'картинку') {
                     fileInput.click();
                 } else if (command === 'прочитать' && args[0] === 'картинку' && args[1]) {
@@ -898,11 +1050,12 @@
                     } else {
                         appendHistory('Нет прикреплённого изображения.');
                     }
+                } else if (command === 'онлайн') {
+                    fetchOnlineUsers();
                 } else {
                     appendHistory(`Неизвестная команда: ${command}. Введите "помощь" для списка команд.`);
                 }
 
-                // Очищаем поле ввода
                 commandInput.value = '';
                 render();
             }
@@ -920,6 +1073,7 @@
                 appendHistory('  загрузить картинку           - открыть проводник для выбора изображения');
                 appendHistory('  прочитать картинку [id]      - открыть изображение');
                 appendHistory('  открепить                    - открепить текущее изображение');
+                appendHistory('  онлайн                       - показать пользователей в сети');
                 appendHistory('  помощь                       - эта справка');
                 appendHistory('  выход                        - выйти из аккаунта');
                 appendHistory('');
@@ -965,6 +1119,46 @@
                 const key = e.key;
                 const input = commandInput;
 
+                // Если меню открыто, обрабатываем стрелки и Enter
+                if (autocompleteMenu.classList.contains('visible')) {
+                    if (key === 'ArrowUp') {
+                        e.preventDefault();
+                        if (selectedCompletionIndex > 0) {
+                            selectedCompletionIndex--;
+                        } else {
+                            selectedCompletionIndex = currentCompletions.length - 1;
+                        }
+                        renderAutocomplete();
+                        return;
+                    }
+                    if (key === 'ArrowDown') {
+                        e.preventDefault();
+                        if (selectedCompletionIndex < currentCompletions.length - 1) {
+                            selectedCompletionIndex++;
+                        } else {
+                            selectedCompletionIndex = 0;
+                        }
+                        renderAutocomplete();
+                        return;
+                    }
+                    if (key === 'Enter' || key === 'Tab') {
+                        e.preventDefault();
+                        if (selectedCompletionIndex !== -1) {
+                            completeWith(currentCompletions[selectedCompletionIndex]);
+                        } else {
+                            hideAutocomplete();
+                        }
+                        return;
+                    }
+                    if (key === 'Escape') {
+                        e.preventDefault();
+                        hideAutocomplete();
+                        return;
+                    }
+                    // При любом другом нажатии закрываем меню
+                    hideAutocomplete();
+                }
+
                 // Ctrl+V (вставка)
                 if (e.ctrlKey && key === 'v') {
                     e.preventDefault();
@@ -990,14 +1184,11 @@
                 // Tab
                 if (key === 'Tab') {
                     e.preventDefault();
-                    handleTab(input.value, input.selectionStart, (newVal, newPos) => {
-                        input.value = newVal;
-                        input.setSelectionRange(newPos, newPos);
-                    });
+                    handleTab();
                     return;
                 }
 
-                // Стрелки вверх/вниз для истории команд
+                // Стрелки вверх/вниз для истории команд (только если меню не открыто)
                 if (key === 'ArrowUp') {
                     e.preventDefault();
                     if (historyIndex > 0) {
@@ -1031,15 +1222,20 @@
                     }
                     uploadImage(file);
                 }
-                fileInput.value = ''; // сбрасываем, чтобы можно было загрузить тот же файл снова
+                fileInput.value = '';
             });
 
             // Фокус на поле ввода при клике на терминал
             document.getElementById('terminalContainer').addEventListener('click', () => commandInput.focus());
+
+            // Скрываем меню при потере фокуса (с задержкой, чтобы не мешать клику по пункту)
+            commandInput.addEventListener('blur', () => {
+                setTimeout(() => hideAutocomplete(), 200);
+            });
 
             // Стартовый рендер
             render();
         })();
     </script>
 </body>
-</html>
+    </html>
