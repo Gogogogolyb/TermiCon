@@ -984,4 +984,4 @@ def handle_unsubscribe(data):
         logger.info(f'User {user_id} unsubscribed from {room}')
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
