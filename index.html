@@ -6,7 +6,6 @@
     <title>TermiCon</title>
     <link rel="manifest" href="/manifest.json">
     <style>
-        /* Все стили остаются без изменений (как в оригинале) */
         * {
             box-sizing: border-box;
             margin: 0;
@@ -35,7 +34,7 @@
             overflow: hidden;
         }
 
-        /* ЭЛТ-эффекты */
+        /* ЭЛТ-эффекты (уменьшены на мобильных) */
         .dos-terminal::before {
             content: "";
             position: absolute;
@@ -45,8 +44,8 @@
             height: 100%;
             background: repeating-linear-gradient(
                 0deg,
-                rgba(0, 255, 255, 0.03) 0px,
-                rgba(0, 255, 255, 0.03) 2px,
+                rgba(255, 255, 255, 0.03) 0px,
+                rgba(255, 255, 255, 0.03) 2px,
                 transparent 2px,
                 transparent 4px
             );
@@ -63,8 +62,8 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background: radial-gradient(circle at 50% 50%, rgba(0, 40, 40, 0.2) 0%, transparent 80%);
-            box-shadow: inset 0 0 50px rgba(0, 20, 20, 0.5);
+            background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.05) 0%, transparent 80%);
+            box-shadow: inset 0 0 50px rgba(255, 255, 255, 0.1);
             pointer-events: none;
             z-index: 1;
             border-radius: inherit;
@@ -99,7 +98,7 @@
             pointer-events: auto;
         }
 
-        /* Окна в стиле ретро-терминала (чёрно-зелёные) */
+        /* Окна в стиле ретро-терминала */
         .retro-window {
             position: absolute;
             background: #000000;
@@ -186,18 +185,19 @@
         .dos-screen {
             flex: 1;
             background: transparent;
-            color: #00ff00;
+            color: #f0f0f0; /* белый текст */
             padding: 16px 20px;
             overflow-y: auto;
             font-size: 16px;
-            line-height: 1.5;
+            line-height: 1.6;
             white-space: pre-wrap;
             word-wrap: break-word;
             outline: none;
             user-select: text;
             scrollbar-width: thin;
             scrollbar-color: #00ff00 #001000;
-            text-shadow: 0 0 5px currentColor, 0 0 10px currentColor;
+            text-rendering: optimizeLegibility;
+            text-shadow: 0 0 3px rgba(255,255,255,0.3), 0 0 6px rgba(255,255,255,0.2);
             -webkit-overflow-scrolling: touch;
         }
         .dos-screen::-webkit-scrollbar {
@@ -245,7 +245,7 @@
             background: transparent;
             border: none;
             border-bottom: 1px solid #00ff00;
-            color: inherit;
+            color: #f0f0f0; /* белый текст в поле ввода */
             font-family: inherit;
             font-size: 16px;
             line-height: 1.5;
@@ -264,7 +264,7 @@
             opacity: 0.8;
         }
 
-        /* Меню автодополнения в ретро-стиле */
+        /* Меню автодополнения */
         .autocomplete-menu {
             position: absolute;
             bottom: 100%;
@@ -275,7 +275,7 @@
             border-radius: 5px 5px 0 0;
             box-shadow: 0 -5px 20px #00ff00;
             font-family: 'Courier New', Courier, monospace;
-            color: #00ff00;
+            color: #f0f0f0;
             max-height: 300px;
             overflow-y: auto;
             z-index: 10;
@@ -316,12 +316,12 @@
 
         /* Ссылки на медиа */
         .media-link {
-            color: #ffaa00;
+            color: #ffff00;
             text-decoration: underline;
             cursor: pointer;
         }
         .media-link:hover {
-            color: #ffcc00;
+            color: #ffff80;
         }
 
         /* Аудиоплеер в сообщениях */
@@ -362,24 +362,21 @@
             color: #88ffff;
             text-shadow: 0 0 5px #00ffff;
         }
+
+        /* Мобильные улучшения */
         @media (max-width: 600px) {
-            .dos-screen {
-                font-size: 14px;
-                padding: 12px 16px;
-            }
-            .dos-terminal::before {
-                opacity: 0.5;
-                background: repeating-linear-gradient(
-                    0deg,
-                    rgba(0, 255, 0, 0.02) 0px,
-                    rgba(0, 255, 0, 0.02) 2px,
-                    transparent 2px,
-                    transparent 4px
-                );
-            }
             .dos-terminal::after {
-                background: radial-gradient(circle at 50% 50%, rgba(0, 40, 0, 0.1) 0%, transparent 80%);
-                box-shadow: inset 0 0 30px rgba(0, 20, 0, 0.3);
+                animation: none;
+                background: radial-gradient(circle at 50% 50%, rgba(255,255,255,0.03) 0%, transparent 80%);
+                box-shadow: inset 0 0 30px rgba(255,255,255,0.1);
+            }
+            .dos-screen {
+                text-shadow: 0 0 2px rgba(255,255,255,0.3);
+                font-size: 15px;
+                line-height: 1.5;
+            }
+            .retro-window {
+                min-width: 200px;
             }
             .autocomplete-menu {
                 left: 10px;
