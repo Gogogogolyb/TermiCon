@@ -16,14 +16,14 @@
     let authenticated = false;
     let currentUserId = null;
     let currentLogin = null;
-    let token = null;               // JWT токен
+    let token = null;
     let mode = 'normal';
     let tempLogin = '';
     let tempPassword = '';
     let autoReadEnabled = false;
     let pendingImageId = null;
     let pendingAudioId = null;
-    let currentColor = 'зеленый';
+    let currentColor = 'белый';          // по умолчанию белый
     let lastUnreadHash = null;
 
     let currentCompletions = [];
@@ -31,14 +31,16 @@
 
     let socket = null;
 
+    // Цвета (добавлен белый)
     const colorMap = {
-        'зеленый': '#00ff80',
+        'зеленый': '#00ff00',
         'красный': '#ff0000',
         'синий': '#0000ff',
         'желтый': '#ffff00',
         'оранжевый': '#ff8800',
         'розовый': '#ff00ff',
-        'голубой': '#00ffff'
+        'голубой': '#00ffff',
+        'белый': '#f0f0f0'
     };
     const VALID_COLORS = Object.keys(colorMap);
 
@@ -55,8 +57,67 @@
     ];
     history.push(...initialLines.map(text => ({ text })));
 
-    // --- Функции ---
-    function openMediaWindow(type, id) {
+    // ---------- Функции отображения ----------
+    function escapeHTML(str) {
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    }
+
+    function linkify(text) {
+        const urlPattern = /(https?:\/\/[^\s]+)/g;
+        return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
+    }
+
+    function setTextColor(colorName) {
+        currentColor = colorName;
+        const cssColor = colorMap[colorName] || '#f0f0f0';
+        outputArea.style.color = cssColor;
+        commandInput.style.color = cssColor;
+    }
+
+    function updatePrompt() {
+        let promptStr = '';
+        if (!authenticated && mode === 'normal') promptStr = '>';
+        else if (authenticated && mode === 'normal') promptStr = `${currentLogin}@pc:~$`;
+        else if (mode === 'awaiting_login') promptStr = 'Логин:';
+        else if (mode === 'awaiting_password') promptStr = 'Пароль:';
+        else if (mode === 'awaiting_register_login') promptStr = 'Придумайте логин:';
+        else if (mode === 'awaiting_register_password') promptStr = 'Придумайте пароль:';
+        promptSpan.textContent = promptStr;
+    }
+
+    function render() {
+        let html = '';
+        for (let lineObj of history) {
+            let escaped = escapeHTML(lineObj.text);
+            let linked = linkify(escaped);
+            if (lineObj.imageId) {
+                linked += ` <span class="media-link" onclick="window.openMediaWindow('image', ${lineObj.imageId})">[Изображение ID: ${lineObj.imageId}]</span>`;
+            }
+            if (lineObj.audioId) {
+                linked += ` <div class="retro-audio"><audio controls src="/audio/${lineObj.audioId}"></audio><span class="audio-label">ID: ${lineObj.audioId}</span></div>`;
+            }
+            html += `<div class="output-line">${linked}</div>`;
+        }
+        outputArea.innerHTML = html;
+        outputArea.scrollTop = outputArea.scrollHeight;
+        updatePrompt();
+    }
+
+    function appendHistory(text, imageId = null, audioId = null) {
+        history.push({ text, imageId, audioId });
+        render();
+    }
+
+    function resetMode() {
+        mode = 'normal';
+        tempLogin = '';
+        tempPassword = '';
+        commandInput.value = '';
+        render();
+    }
+
+    // ---------- Окна с медиа (поддержка touch) ----------
+    window.openMediaWindow = function(type, id) {
         const url = type === 'image' ? `/image/${id}` : `/audio/${id}`;
         const title = type === 'image' ? `Изображение ID: ${id}` : `Аудио ID: ${id}`;
 
@@ -132,7 +193,7 @@
             }
         });
 
-        // Перетаскивание касанием
+        // Перетаскивание касанием (touch)
         titleBar.addEventListener('touchstart', (e) => {
             if (e.target === closeBtn) return;
             e.preventDefault();
@@ -163,67 +224,9 @@
                 win.style.cursor = 'default';
             }
         });
-    }
+    };
 
-    function escapeHTML(str) {
-        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-    }
-
-    function linkify(text) {
-        const urlPattern = /(https?:\/\/[^\s]+)/g;
-        return text.replace(urlPattern, '<a href="$1" target="_blank">$1</a>');
-    }
-
-    function setTextColor(colorName) {
-        currentColor = colorName;
-        const cssColor = colorMap[colorName] || '#00ff80';
-        outputArea.style.color = cssColor;
-        commandInput.style.color = cssColor;
-    }
-
-    function updatePrompt() {
-        let promptStr = '';
-        if (!authenticated && mode === 'normal') promptStr = '>';
-        else if (authenticated && mode === 'normal') promptStr = `${currentLogin}@pc:~$`;
-        else if (mode === 'awaiting_login') promptStr = 'Логин:';
-        else if (mode === 'awaiting_password') promptStr = 'Пароль:';
-        else if (mode === 'awaiting_register_login') promptStr = 'Придумайте логин:';
-        else if (mode === 'awaiting_register_password') promptStr = 'Придумайте пароль:';
-        promptSpan.textContent = promptStr;
-    }
-
-    function render() {
-        let html = '';
-        for (let lineObj of history) {
-            let escaped = escapeHTML(lineObj.text);
-            let linked = linkify(escaped);
-            if (lineObj.imageId) {
-                linked += ` <span class="media-link" onclick="openMediaWindow('image', ${lineObj.imageId})">[Изображение ID: ${lineObj.imageId}]</span>`;
-            }
-            if (lineObj.audioId) {
-                linked += ` <div class="retro-audio"><audio controls src="/audio/${lineObj.audioId}"></audio><span class="audio-label">ID: ${lineObj.audioId}</span></div>`;
-            }
-            html += `<div class="output-line">${linked}</div>`;
-        }
-        outputArea.innerHTML = html;
-        outputArea.scrollTop = outputArea.scrollHeight;
-        updatePrompt();
-    }
-
-    function appendHistory(text, imageId = null, audioId = null) {
-        history.push({ text, imageId, audioId });
-        render();
-    }
-
-    function resetMode() {
-        mode = 'normal';
-        tempLogin = '';
-        tempPassword = '';
-        commandInput.value = '';
-        render();
-    }
-
-    // --- Сессия (храним только токен) ---
+    // ---------- Сессия ----------
     function saveSession(token, userId, login, color) {
         const session = {
             token: token,
@@ -271,7 +274,7 @@
     }
     loadCommandHistory();
 
-    // --- WebSocket с аутентификацией ---
+    // ---------- WebSocket ----------
     function connectWebSocket() {
         if (socket && socket.connected) return;
         socket = io(API_BASE || window.location.origin, {
@@ -321,7 +324,7 @@
         }
     }
 
-    // --- API запросы с токеном ---
+    // ---------- API запросы ----------
     async function apiRequest(method, endpoint, body = null) {
         const options = {
             method,
@@ -346,6 +349,7 @@
         }
     }
 
+    // ---------- Функции для работы с сообщениями и каналами ----------
     async function fetchUnreadSummary(silent = false) {
         if (!authenticated || !currentUserId) return null;
         const data = await apiRequest('GET', '/unread_summary');
@@ -486,964 +490,665 @@
             pendingAudioId = null;
             if (user.color_pref) {
                 setTextColor(user.color_pref);
+            } else {
+                setTextColor('белый');  // по умолчанию белый
             }
             appendHistory(`Добро пожаловать, ${user.login}!`);
-            await fetchUn            await fetchUnreadSummary(false);
-readSummary(false);
-            connect            connectWebSocketWebSocket();
-           ();
-            saveSession saveSession(token, user.id(token, user.id, user, user.login, currentColor.login, currentColor);
-       );
+            await fetchUnreadSummary(false);
+            connectWebSocket();
+            saveSession(token, user.id, user.login, currentColor);
         }
-        }
-        resetMode resetMode();
-   ();
-    }
-
-    }
-
-    async function async function performRegister performRegister(login(login, password, password) {
-) {
-        const        const data = await api data = await apiRequest('POST', '/registerRequest('POST', '/register', { login,', { login, password });
-        if password });
-        if (data (data) {
-            appendHistory(`) {
-            appendHistory(`РегиРегистрация успешстрация успешна.на. Ва Ваш ID: ${ш ID: ${datadata.result.user_id.result.user_id}`);
-            // Не}`);
-            // Не в входимходим автоматически, предлага автоматически, предлагаем войем войти
-ти
-        }
-        reset        }
         resetMode();
-Mode();
     }
 
+    async function performRegister(login, password) {
+        const data = await apiRequest('POST', '/register', { login, password });
+        if (data) {
+            appendHistory(`Регистрация успешна. Ваш ID: ${data.result.user_id}`);
+        }
+        resetMode();
     }
 
-    async function checkSession()    async function checkSession() {
+    async function checkSession() {
         const session = loadSession();
- {
-        const session = loadSession();
-        if        if (!session) return (!session) return;
-       ;
-        token = token = session.token session.token;
-       ;
-        // Пров // Проверим токен, заперим токен, запросивросив данные пользователя (можно через данные пользователя (можно через /un /unread_sumread_summary илиmary или спец. спец. энд эндпоинпоинт)
-        const data =т)
-        const data = await api await apiRequest('GET', '/unread_summary');
-        ifRequest('GET', '/unread_summary');
-        if (data (data) {
-) {
-            //            // Т Токенокен вали валидный
-           дный
-            authenticated = authenticated = true;
- true;
-            current            currentUserId =UserId = session.user session.userId;
-Id;
-            current            currentLogin = session.loginLogin =;
-            setTextColor(session session.login;
-            setTextColor.color ||(session.color || 'зеленый');
- 'зеленый');
-            append            appendHistory(`History(`Добро пожДобро пожаловать, ${аловать, ${sessionsession.login}! (се.login}!ссия восстановлена (сессия восстановлена)`);
-)`);
-            await            await fetchUn fetchUnreadSummary(false);
-readSummary(false);
-            connect            connectWebSocketWebSocket();
-        } else();
+        if (!session) return;
+        token = session.token;
+        const data = await apiRequest('GET', '/unread_summary');
+        if (data) {
+            authenticated = true;
+            currentUserId = session.userId;
+            currentLogin = session.login;
+            setTextColor(session.color || 'белый');
+            appendHistory(`Добро пожаловать, ${session.login}! (сессия восстановлена)`);
+            await fetchUnreadSummary(false);
+            connectWebSocket();
         } else {
-            {
-            clearSession clearSession();
-           ();
-            token = token = null;
- null;
-        }
+            clearSession();
+            token = null;
         }
     }
 
-    }
+    function uploadFile(file) {
+        const formData = new FormData();
+        formData.append('image', file);
 
-    function    function uploadFile uploadFile(file) {
-       (file) {
-        const form const formData =Data = new FormData();
- new Form        formData.append('imageData();
-        formData.append', file);
-
-       ('image', file);
-
-        fetch(`${API_B fetch(`${API_BASE}/upload_image`, {
-ASE}/upload_image`, {
-            method            method: ': 'POST',
-POST',
+        fetch(`${API_BASE}/upload_image`, {
+            method: 'POST',
             headers: {
-            headers: {
-                '                'Authorization':Authorization': `Bearer `Bearer ${token}`
- ${token}`
+                'Authorization': `Bearer ${token}`
             },
-            },
-            body            body: form: formData
-Data
+            body: formData
         })
-        })
-        .        .then(resp =>then(res resp.jsonp =>())
-        .then(data => resp.json())
-        .then {
-            if (data.error(data => {
+        .then(resp => resp.json())
+        .then(data => {
             if (data.error) {
-) {
-                appendHistory(`                appendHistory(`ОшибОшибка зака загрузкигрузки: ${data.error: ${data.error}`);
-           }`);
-            } else } else {
-                {
-                const media const mediaId = data.resultId = data.result.media.media_id;
-_id;
-                const                const type = data.result type =.type;
- data.result.type;
-                if                if (type (type === ' === 'image')image') {
-                    {
-                    pendingImage pendingImageId = mediaId;
-                    appendHistoryId = mediaId;
-                    appendHistory(`✅ Изображ(`✅ Изображение заение загружгружено. ID:ено. ID: ${media ${mediaId}.Id}. Оно Оно будет прикреплено будет прикреплено к следую к следующему отправщему отправленному сообщленному сообщению.ению.`);
-               `);
+                appendHistory(`Ошибка загрузки: ${data.error}`);
+            } else {
+                const mediaId = data.result.media_id;
+                const type = data.result.type;
+                if (type === 'image') {
+                    pendingImageId = mediaId;
+                    appendHistory(`✅ Изображение загружено. ID: ${mediaId}. Оно будет прикреплено к следующему отправленному сообщению.`);
                 } else {
-                    } else {
-                    pendingAudio pendingAudioId =Id = mediaId;
-                    mediaId;
-                    appendHistory appendHistory(`🎵 Аудио(`🎵 Аудио загружено. ID загружено: ${mediaId. ID: ${mediaId}. Оно будет}. О прикрепно будет прикреплено клено к следующему следующему отправлен отправленному сообщениюному сообщению.`);
-.`);
+                    pendingAudioId = mediaId;
+                    appendHistory(`🎵 Аудио загружено. ID: ${mediaId}. Оно будет прикреплено к следующему отправленному сообщению.`);
                 }
             }
         })
-        .                }
-            }
-        })
-        .catch(errcatch(err => {
- => {
-            appendHistory(`            appendHistory(`ОшибОшибка соединка соединения при загрузения при загрузке:ке: ${err ${err.message}`);
-.message}`);
-        });
+        .catch(err => {
+            appendHistory(`Ошибка соединения при загрузке: ${err.message}`);
         });
     }
 
-    }
-
-    async    async function fetchOnlineUsers function fetchOnlineUsers() {
-() {
-        const        const data = await api data = await apiRequest('Request('GET',GET', '/online '/online_users');
-_users');
-        if        if (data) {
- (data) {
-            const            const users = data.result;
+    async function fetchOnlineUsers() {
+        const data = await apiRequest('GET', '/online_users');
+        if (data) {
+            const users = data.result;
             if (users.length === 0) {
-                appendHistory('Нет пользова users = data.result;
-            if (users.length === 0) {
-                appendHistory('Нет пользователей втелей в сети.');
- сети.');
-            }            } else {
- else {
-                append                appendHistory('History('Пользователи вПользова сети:тели в сети:');
-               ');
-                users.forEach users.forEach(u => {
-                   (u => {
-                    appendHistory appendHistory(`  ${u(`  ${u.login}.login} (ID (ID: ${: ${u.id}) —u.id}) — последняя последняя активность активность: ${: ${u.lastu.last_seen_seen}`);
-               }`);
-                });
-            });
-            }
-        }
-        }
-    }
-    }
-
-    }
-
-    async function async function fetchMyChannels fetchMyChannels() {
-() {
-        const        const data = data = await apiRequest(' await apiRequest('GETGET',', '/my '/my_channels');
-_channels');
-        if        if (data (data) {
-) {
-            const            const channels = channels = data.result data.result;
-           ;
-            if (channels if (channels.length ===.length === 0 0) {
-) {
-                appendHistory('                appendHistory('Вы неВы не подписаны подписаны ни на ни на один ка один канал.');
-нал.');
-            }            } else {
- else {
-                appendHistory('                appendВашиHistory('Ваши кана каналы:лы:');
-               ');
-                channels.forEach channels.forEach(ch => {
-                   (ch => {
-                    appendHistory appendHistory(` (`  ${ch ${ch.name}.name} (владеле (владелец: ${ch.ц: ${ch.ownerowner_login})_login}) — непрочитано: — непрочитано: ${ch ${ch.unread.unread_count}`);
-_count}`);
-                });
+                appendHistory('Нет пользователей в сети.');
+            } else {
+                appendHistory('Пользователи в сети:');
+                users.forEach(u => {
+                    appendHistory(`  ${u.login} (ID: ${u.id}) — последняя активность: ${u.last_seen}`);
                 });
             }
+        }
+    }
+
+    async function fetchMyChannels() {
+        const data = await apiRequest('GET', '/my_channels');
+        if (data) {
+            const channels = data.result;
+            if (channels.length === 0) {
+                appendHistory('Вы не подписаны ни на один канал.');
+            } else {
+                appendHistory('Ваши каналы:');
+                channels.forEach(ch => {
+                    appendHistory(`  ${ch.name} (владелец: ${ch.owner_login}) — непрочитано: ${ch.unread_count}`);
+                });
             }
         }
     }
 
-        }
-    async    }
-
-    async function set function setUserColorUserColor(color)(color) {
-        {
-        const data = await const data = await apiRequest apiRequest('POST('POST', '/', '/set_colorset_color', {', { color });
- color });
-        if        if (data (data) {
-) {
-            append            appendHistory(data.result);
-History(data            set.result);
-            setTextColorTextColor(color);
-            //(color);
-            // Об Обновляемновляем сесси сессию
-ю
-            const            const session = session = loadSession();
-            loadSession if (();
-            if (session)session) {
-                {
-                session.color session.color = color = color;
-               ;
-                saveSession(session.token, session.userId, saveSession(session.token, session.userId, session.login, color session.login, color);
-           );
+    async function setUserColor(color) {
+        const data = await apiRequest('POST', '/set_color', { color });
+        if (data) {
+            appendHistory(data.result);
+            setTextColor(color);
+            const session = loadSession();
+            if (session) {
+                session.color = color;
+                saveSession(session.token, session.userId, session.login, color);
             }
         }
-        }
     }
 
-    // --- }
+    async function apiCommand(command, args) {
+        await apiRequest('POST', '/command', { command, args });
     }
 
-    // --- Коман Команды ---
-   ды --- const commands
+    // ---------- Команды ----------
     const commands = {
- = {
-        '        'напнаписать':исать': (args (args) =>) => {
-            {
-            if ( if (args.length < args.length < 2)2) {
-                {
-                appendHistory appendHistory('Использова('Использование:ние: написать написать [ID [ID] [сооб] [сообщение]щение]');
-                return;
-');
+        'написать': (args) => {
+            if (args.length < 2) {
+                appendHistory('Использование: написать [ID] [сообщение]');
                 return;
             }
-            }
-            const toId            const toId = args[0];
-            if ( = args[0];
-            if (isNaNisNaN(toId(toId)) {
-                append)) {
-                appendHistory('History('Ошибка:Ошибка: ID должен ID должен быть чис быть числом');
-лом');
+            const toId = args[0];
+            if (isNaN(toId)) {
+                appendHistory('Ошибка: ID должен быть числом');
                 return;
             }
-                           return;
-            }
-            const message const message = args.slice( = args.slice(1).1).join(' ');
-           join(' ');
-            apiCommand('на apiCommand('написать', { to_idписать', { to_id: toId,: toId, message, message, image_id image_id: pending: pendingImageId, audioImageId, audio_id:_id: pendingAudio pendingAudioId });
-            pendingId });
-            pendingImageIdImageId = null = null;
-           ;
-            pendingAudio pendingAudioId =Id = null;
- null;
+            const message = args.slice(1).join(' ');
+            apiCommand('написать', { to_id: toId, message, image_id: pendingImageId, audio_id: pendingAudioId });
+            pendingImageId = null;
+            pendingAudioId = null;
         },
-        '        },
-        'профипрофиль': (argsль': (args) => {
-            if () => {
-            if (args.length < args.length < 1) {
-               1) {
-                appendHistory('И appendHistory('Использование:спользование: профиль [ID]');
- профиль [ID]');
-                return                return;
+        'профиль': (args) => {
+            if (args.length < 1) {
+                appendHistory('Использование: профиль [ID]');
+                return;
             }
-           ;
+            const profileId = args[0];
+            if (isNaN(profileId)) {
+                appendHistory('Ошибка: ID должен быть числом');
+                return;
             }
-            const profile const profileId =Id = args[0];
- args[0];
-            if (is            if (isNaN(profileId)) {
-NaN(profileId)) {
-                append                appendHistory('History('ОшибОшибка:ка: ID должен ID должен быть числом');
- быть числом');
-                return                return;
-            }
-           ;
-            apiCommand('про }
-            apiCommand('профильфиль', {', { profile_id: profile profile_id: profileId });
-Id });
+            apiCommand('профиль', { profile_id: profileId });
         },
-        '        },
-        'пингпинг': ()': () => appendHistory('понг'),
-        'мой => appendHistory('понг'),
-        'мойид':ид': () => appendHistory(`Ваш ID () => appendHistory(`Ваш ID: ${: ${currentUserId}`),
-currentUserId}`),
-        '        'непронепрочитанныечитанные': ()': () => fetch => fetchUnreadUnreadSummary(falseSummary(false),
-       ),
-        'про 'прочитать': (argsчитать':) => (args) => {
-            if (args.length ===  {
+        'пинг': () => appendHistory('понг'),
+        'мойид': () => appendHistory(`Ваш ID: ${currentUserId}`),
+        'непрочитанные': () => fetchUnreadSummary(false),
+        'прочитать': (args) => {
             if (args.length === 0) {
-                appendHistory0) {
-                appendHistory('И('Использоваспользование: прочитатьние: прочитать [в [всёсё | ID]');
- | ID]');
-                return                return;
-           ;
+                appendHistory('Использование: прочитать [всё | ID]');
+                return;
             }
-            if ( }
-            if (args[0]args[0] === 'вс === 'всё')ё') {
-                {
+            if (args[0] === 'всё') {
                 readMessages();
-            readMessages();
-            } else } else {
-                const from {
-               Id = args const fromId = args[0];
-                if[0];
-                if (is (isNaN(fromId))NaN(fromId)) {
-                    {
-                    appendHistory appendHistory('О('Ошибкашибка: ID: ID должен быть числом должен быть числом');
-                   ');
+            } else {
+                const fromId = args[0];
+                if (isNaN(fromId)) {
+                    appendHistory('Ошибка: ID должен быть числом');
                     return;
                 }
- return;
-                read                }
-                readMessages(fromMessages(fromId);
-Id);
+                readMessages(fromId);
             }
         },
-            }
-        },
-        '        'прочитатьпрочитать всё': всё': () => () => readMessages readMessages(),
-       (),
-        'помощ 'помощь':ь': () => showHelp () => showHelp(),
-       (),
-        'вых 'выход':од': () => {
-            () => {
-            authenticated = authenticated = false;
-            currentUserId = false;
+        'прочитать всё': () => readMessages(),
+        'помощь': () => showHelp(),
+        'выход': () => {
+            authenticated = false;
             currentUserId = null;
- null;
-            currentLogin =            currentLogin = null;
- null;
-            token            token = null;
-            = null;
-            lastUn lastUnreadHash = null;
-           readHash = null autoRead;
-           Enabled = autoReadEnabled = false;
-            pending false;
-            pendingImageIdImageId = null = null;
-            pendingAudio;
-            pendingAudioId =Id = null;
- null;
-            disconnect            disconnectWebSocket();
-            setTextWebSocket();
-           Color(' setTextColor('зелензеленый');
-ый');
+            currentLogin = null;
+            token = null;
+            lastUnreadHash = null;
+            autoReadEnabled = false;
+            pendingImageId = null;
+            pendingAudioId = null;
+            disconnectWebSocket();
+            setTextColor('белый');
             clearSession();
-            clearSession();
-            append            appendHistory('Вы выHistory('Вы вышли изшли из аккаунта аккаунта.');
-           .');
-            appendHistory('Д appendHistoryоступные коман('Доступды:ные команды: вход, вход, регистра регистрация, загруция, загрузить картинкузить кар, затинкугрузить музыку, загрузить музыку, прочитать кар, прочитать картинкутинку, про, прослушатьслушать музыку, онлайн музыку, онлайн');
-       ');
+            appendHistory('Вы вышли из аккаунта.');
+            appendHistory('Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн');
         },
-        'онлайн': fetchOnline },
         'онлайн': fetchOnlineUsers,
-        'Users,
-        'каналы': fetchMyканалы': fetchMyChannelsChannels,
-       ,
-        'цвет': ( 'цвет': (args)args) => {
-            if => {
-            if (args (args.length.length < 1) {
- < 1) {
-                append                appendHistory(`History(`ИспользованиеИспользование: цвет: цвет [на [название]. Доступны: ${звание]. Доступны: ${VALID_COLORSVALID_COLORS.join(',.join(', ')}`);
-                ')}`);
+        'каналы': fetchMyChannels,
+        'цвет': (args) => {
+            if (args.length < 1) {
+                appendHistory(`Использование: цвет [название]. Доступны: ${VALID_COLORS.join(', ')}`);
                 return;
- return;
             }
-            }
-            const color = args            const color = args[0];
-            if[0];
- (!VALID_COL            if (!VALID_COLORS.includesORS.includes(color))(color)) {
-                {
-                appendHistory appendHistory(`Н(`Недопуедопустимстимый цвет. Доступныый цвет. Доступны: ${VALID_COLORS: ${VALID_CO.join(',LORS.join(', ')} ')}`);
-               `);
-                return return;
+            const color = args[0];
+            if (!VALID_COLORS.includes(color)) {
+                appendHistory(`Недопустимый цвет. Доступны: ${VALID_COLORS.join(', ')}`);
+                return;
             }
             setUserColor(color);
         },
-        ';
-            }
-            setUserColor(color);
+        'автопрочтение': () => {
+            autoReadEnabled = !autoReadEnabled;
+            appendHistory(`Автоматическое чтение ${autoReadEnabled ? 'включено' : 'отключено'}.`);
         },
-        'автавтопрочтопрочтение': () =>ение': () => {
-            {
-            autoRead autoReadEnabled =Enabled = !auto !autoReadEnabledReadEnabled;
-           ;
-            appendHistory appendHistory(`Ав(`Автоматическое чттоматическое чтение ${autoReadEnabled ?ение ${autoReadEnabled ? 'включено 'включено' :' : 'отключено 'отключено'}.`);
-       '}.`);
-        },
-        'ка },
-        'канал создатьнал создать': (': (args)args) => {
-            if => {
-            if (args (args.length.length < 1) {
- < 1) {
-                append                appendHistory('History('ИспользованиеИсп: каользование: канал создатьнал создать [на [название]');
-звание]');
+        'канал создать': (args) => {
+            if (args.length < 1) {
+                appendHistory('Использование: канал создать [название]');
                 return;
-                           return;
             }
-            }
-            const name const name = args.join(' = args.join(' ');
-            ');
+            const name = args.join(' ');
             channelCreate(name);
- channelCreate(name);
         },
-        },
-        '        'каналканал подп подписатьсяисаться': (args)': (args) => {
- => {
-            if            if (args.length (args < 1.length < 1) {
-) {
-                append                appendHistory('History('ИспИспользование: канал подользование: канал подписаписатьсяться [наз [название]вание]');
-               ');
+        'канал подписаться': (args) => {
+            if (args.length < 1) {
+                appendHistory('Использование: канал подписаться [название]');
                 return;
             }
- return;
-            }
-            const            const name = name = args.join(' ');
- args.join(' ');
-            channel            channelSubscribe(name);
+            const name = args.join(' ');
+            channelSubscribe(name);
         },
-       Subscribe(name);
-        },
-        'канал от 'канал отписаться': (argsписаться':) => (args) => {
-            if (args.length {
-            if (args.length <  < 1)1) {
-                {
-                appendHistory appendHistory('И('Использование:спользова каналние: канал отп отписатьсяисаться [на [названиезвание]');
-]');
-                return                return;
-           ;
-            }
-            const name = args }
-            const name = args.join('.join(' ');
-            ');
-            channelUn channelUnsubscribe(name);
-       subscribe(name);
-        },
-        },
-        'канал нап 'канал написать':исать': (args (args) =>) => {
-            if ( {
-            if (args.lengthargs.length < 2) < 2) {
-                {
-                appendHistory appendHistory('Использова('Использование:ние: канал канал написать написать [ [наназваниезвание]] [сообщение] [сообщение]');
-               ');
-                return;
- return;
-            }
-            }
-            const name =            const name = args args[0];
-[0];
-            const            const message = args.slice message = args.slice(1(1).join).join(' ');
-(' ');
-            channelSend(name, message            channelSend(name, message, pending, pendingImageIdImageId, pending, pendingAudioIdAudioId);
-            pendingImage);
-            pendingImageId =Id = null;
- null;
-            pending            pendingAudioIdAudioId = null;
-        = null;
-        },
-        'ка },
-        'канал прочитать': (args) =>нал прочитать': (args) => {
-            if ( {
-            if (args.lengthargs.length <  < 1) {
-               1) {
-                appendHistory appendHistory('Использование:('Использование: канал канал прочитать [на прочитатьзвание [название]');
-]');
-                return                return;
-           ;
-            }
-            }
-            const name const name = args = args.join(' ');
-           .join(' ');
-            channelRead channelRead(name);
-        },
-        '(name);
-        },
-        'каналканал удалить удалить': (args) => {
-': (args) => {
-            if (args            if (args.length.length < 1 < 1) {
-) {
-                appendHistory('                appendHistory('ИспИспользованиеользование: ка: канал уданал удалитьлить [название]');
-                return;
- [название]');
+        'канал отписаться': (args) => {
+            if (args.length < 1) {
+                appendHistory('Использование: канал отписаться [название]');
                 return;
             }
+            const name = args.join(' ');
+            channelUnsubscribe(name);
+        },
+        'канал написать': (args) => {
+            if (args.length < 2) {
+                appendHistory('Использование: канал написать [название] [сообщение]');
+                return;
             }
-            const            const name = name = args.join args.join(' ');
-(' ');
-            channel            channelDelete(name);
-       Delete(name);
+            const name = args[0];
+            const message = args.slice(1).join(' ');
+            channelSend(name, message, pendingImageId, pendingAudioId);
+            pendingImageId = null;
+            pendingAudioId = null;
         },
+        'канал прочитать': (args) => {
+            if (args.length < 1) {
+                appendHistory('Использование: канал прочитать [название]');
+                return;
+            }
+            const name = args.join(' ');
+            channelRead(name);
         },
-        'за 'загрузитьгрузить картин картинку':ку': () => () => {
-            fileInput {
-           .accept fileInput.accept = ' = 'image/pimage/png,ng, image/j image/jpeg,peg, image/gif, image/gif, image/b image/bmp,mp, image/web image/webp';
-p';
-            fileInput.click            fileInput.click();
-       ();
+        'канал удалить': (args) => {
+            if (args.length < 1) {
+                appendHistory('Использование: канал удалить [название]');
+                return;
+            }
+            const name = args.join(' ');
+            channelDelete(name);
         },
-        'за },
-        'загрузитьгрузить музыку': () => {
- музыку': ()            file => {
-            fileInput.acInput.accept = 'audio/mpcept = 'audio3,/mp3, audio/wav, audio/wav, audio/ audio/ogg,ogg, audio/m4a audio/m4a, audio, audio/flac/flac';
-           ';
+        'загрузить картинку': () => {
+            fileInput.accept = 'image/png, image/jpeg, image/gif, image/bmp, image/webp';
             fileInput.click();
         },
- fileInput.click();
+        'загрузить музыку': () => {
+            fileInput.accept = 'audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac';
+            fileInput.click();
         },
-        '        'прочитать картинпрочитать картинку':ку': (args) => (args) => {
+        'прочитать картинку': (args) => {
             if (args.length < 1) {
-                appendHistory('Использова {
+                appendHistory('Использование: прочитать картинку [ID]');
+                return;
+            }
+            const id = args[0];
+            if (isNaN(id)) {
+                appendHistory('Ошибка: ID должен быть числом');
+                return;
+            }
+            openMediaWindow('image', id);
+        },
+        'прослушать музыку': (args) => {
             if (args.length < 1) {
-                appendHistory('Использование: прочитать картинние: прочитать картинкуку [ID] [ID]');
-                return;
-');
+                appendHistory('Использование: прослушать музыку [ID]');
                 return;
             }
+            const id = args[0];
+            if (isNaN(id)) {
+                appendHistory('Ошибка: ID должен быть числом');
+                return;
             }
-            const            const id = args id = args[0];
-            if[0];
-            if (is (isNaN(idNaN(id)) {
-)) {
-                appendHistory('                appendHistory('ОшибОшибка:ка: ID должен ID должен быть чис быть числом');
-лом');
-                return                return;
-            }
-           ;
-            openMedia }
-            openMediaWindow('Window('image',image', id);
- id);
+            openMediaWindow('audio', id);
         },
-        '        },
-        'прослушатьпрослушать музыку музыку': (': (args)args) => {
- => {
-            if (args            if (args.length.length < 1 < 1) {
-) {
-                append                appendHistory('History('ИспИспользованиеользование: про: прослушатьслушать музыку музыку [ID [ID]');
-]');
-                return                return;
-           ;
-            }
-            const id }
-            const id = args = args[0[0];
-           ];
-            if (isNaN if (isNaN(id))(id)) {
-                appendHistory {
-                appendHistory('О('Ошибкашибка: ID: ID должен быть должен быть числом числом');
-               ');
-                return;
-            }
-            open return;
-            }
-            openMediaWindow('audioMediaWindow', id('audio', id);
-       );
-        },
-        'от },
-        'открепить': ()крепить => {
-': () => {
-            pending            pendingImageId = null;
-           ImageId = null;
+        'открепить': () => {
+            pendingImageId = null;
             pendingAudioId = null;
-            append pendingAudioId = null;
-            appendHistory('ПрикрепHistory('Прикреплённыелённые медиа медиа сброш сброшены.');
-ены.');
+            appendHistory('Прикреплённые медиа сброшены.');
         },
-        },
-        'ава        'аватар':тар': (args (args) => {
-           ) => {
-            if (args.length < 1) if (args.length < 1) {
-                appendHistory(' {
-                appendHistory('ИспользоваИспользование:ние: ава аватар [ID изображтар [ID изображения]ения]');
-                return;
-');
+        'аватар': (args) => {
+            if (args.length < 1) {
+                appendHistory('Использование: аватар [ID изображения]');
                 return;
             }
-            }
-            const            const imageId imageId = args = args[0[0];
-           ];
-            if (isNaN if (isNaN(imageId(imageId)) {
-                append)) {
-                appendHistory('History('Ошибка: ID долженОшиб быть числом');
-ка: ID должен быть числом');
+            const imageId = args[0];
+            if (isNaN(imageId)) {
+                appendHistory('Ошибка: ID должен быть числом');
                 return;
-                           return;
             }
-            }
-            apiCommand apiCommand('аватар('аватар', {', { image_id: image image_id: imageId });
-Id });
-        }
+            apiCommand('аватар', { image_id: imageId });
         }
     };
 
-    function    };
-
-    function showHelp showHelp() {
-() {
-        appendHistory('        appendHistory('ДоступныеДоступные команды (после входа):');
- команды (после входа):');
-        for (let        for (let [cat, cmds] of [cat, cmds] of Object. Object.entries(commandCategories))entries(commandCategories)) {
-            {
-            appendHistory appendHistory(`  ${cat(`  ${cat}: ${}: ${cmdscmds.join(',.join(', ')}`);
-        ')}`);
-        }
-    }
-    }
-
-    async function }
-
-    async function apiCommand(command, apiCommand args)(command, args) {
-        {
-        await api await apiRequest('POST', '/command', {Request('POST', '/command', { command, args });
- command,    }
-
- args });
-    }
-
-    //    // --- Автод --- Авополтодополнение ---нение ---
-    function getAll
-    function getAllCommands()Commands() {
-        if (! {
-       authenticated if (!) {
-authenticated) {
-            return            return ['вход', ['в 'регистрация', 'ход', 'регистрациязагру', 'зить карзагрузить картинкутинку', 'загрузить музыку', 'прочитать кар', 'загрузить музыку', 'протинку', 'читать картинкупрос', 'прослушатьлушать музыку музыку', 'онлайн', 'онлайн'];
-       '];
-        } else } else {
-            return Object {
-            return Object.keys(.keys(commands);
+    function showHelp() {
+        appendHistory('Доступные команды (после входа):');
+        for (let [cat, cmds] of Object.entries(commandCategories)) {
+            appendHistory(`  ${cat}: ${cmds.join(', ')}`);
         }
     }
 
-commands);
+    // ---------- Автодополнение ----------
+    function getAllCommands() {
+        if (!authenticated) {
+            return ['вход', 'регистрация', 'загрузить картинку', 'загрузить музыку', 'прочитать картинку', 'прослушать музыку', 'онлайн'];
+        } else {
+            return Object.keys(commands);
         }
     }
 
-    function    function showAut showAutocomplete(completocomplete(completions) { /*ions) { /* ... ... без изменений ... */ }
- без изменений ... */ }
-    function    function hideAutocomplete() { /* ... без hideAutocomplete() { /* ... без изменений ... */ }
-    изменений ... */ }
-    function renderAutocomplete function renderAutocomplete(categorized) {(categorized) { /* ... /* ... без изменений ... без измен */ }
-    functionений ... */ }
-    function completeWith completeWith(com(completion)pletion) { /* ... без { /* изменений ... без изменений ... */ ... */ }
-    function get }
-    function getCompletionListCompletionList(prefix(prefix) { /* ...) { /* ... без изменений ... без изменений ... */ }
-    function */ }
-    function handleTab() { /* ... без измен handleTab() { /* ... без изменений ... */ }
+    function showAutocomplete(completions) {
+        if (!completions || completions.length === 0) {
+            hideAutocomplete();
+            return;
+        }
+        let categorized = {};
+        for (let cmd of completions) {
+            let found = false;
+            for (let [cat, cmds] of Object.entries(commandCategories)) {
+                if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && !cmd.startsWith('загрузить') && !cmd.startsWith('прочитать') && cmd !== 'открепить' && cmd !== 'аватар')) {
+                    if (!categorized[cat]) categorized[cat] = [];
+                    categorized[cat].push(cmd);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                if (!categorized['Прочее']) categorized['Прочее'] = [];
+                categorized['Прочее'].push(cmd);
+            }
+        }
+        currentCompletions = completions;
+        selectedCompletionIndex = 0;
+        renderAutocomplete(categorized);
+        autocompleteMenu.classList.add('visible');
+    }
 
-    // --- Оений ... */ }
+    function hideAutocomplete() {
+        autocompleteMenu.classList.remove('visible');
+        currentCompletions = [];
+        selectedCompletionIndex = -1;
+    }
 
-    // --- Обработка ввода ---бработка ввода ---
-    function execute
-   Command(cmd) function executeCommand(cmd) {
- {
-        const trimmed = cmd.trim        const trimmed = cmd.trim();
-        if (trimmed === ''();
-        if (trimmed === '' && mode && mode === 'normal') === ' return;
+    function renderAutocomplete(categorized) {
+        let html = '';
+        let flatIndex = 0;
+        for (let [category, items] of Object.entries(categorized)) {
+            html += `<div class="autocomplete-category">${category}</div>`;
+            items.sort().forEach(item => {
+                const selectedClass = flatIndex === selectedCompletionIndex ? 'selected' : '';
+                html += `<div class="autocomplete-item ${selectedClass}" data-index="${flatIndex}">${item}</div>`;
+                flatIndex++;
+            });
+        }
+        autocompleteMenu.innerHTML = html;
+        document.querySelectorAll('.autocomplete-item').forEach(el => {
+            el.addEventListener('click', (e) => {
+                const index = parseInt(e.target.dataset.index);
+                if (!isNaN(index) && currentCompletions[index]) {
+                    completeWith(currentCompletions[index]);
+                }
+            });
+        });
+    }
 
-normal') return;
+    function completeWith(completion) {
+        if (!completion) return;
+        commandInput.value = completion;
+        commandInput.setSelectionRange(completion.length, completion.length);
+        hideAutocomplete();
+    }
 
-        if        if (autocompleteMenu (autocompleteMenu.classList.contains('visible.classList.contains('visible') && selectedCompletionIndex !== -1') && selectedCompletionIndex !==) {
-            const selected = currentCom -1) {
-            const selected = currentCompletions[selectedpletions[selectedCompletionIndexCompletionIndex];
-            if (];
-            if (selected)selected) {
-                {
+    function getCompletionList(prefix) {
+        const all = getAllCommands();
+        return all.filter(cmd => cmd.startsWith(prefix));
+    }
+
+    function handleTab() {
+        if (mode !== 'normal') {
+            hideAutocomplete();
+            return;
+        }
+        const input = commandInput;
+        const cursorPos = input.selectionStart;
+        const beforeCursor = input.value.slice(0, cursorPos);
+        const lastSpaceBefore = beforeCursor.lastIndexOf(' ');
+        const startOfWord = lastSpaceBefore === -1 ? 0 : lastSpaceBefore + 1;
+        const wordPrefix = beforeCursor.slice(startOfWord);
+        const completions = getCompletionList(wordPrefix);
+        if (completions.length === 0) {
+            hideAutocomplete();
+            return;
+        }
+        showAutocomplete(completions);
+    }
+
+    // ---------- Обработка ввода ----------
+    function executeCommand(cmd) {
+        const trimmed = cmd.trim();
+        if (trimmed === '' && mode === 'normal') return;
+
+        if (autocompleteMenu.classList.contains('visible') && selectedCompletionIndex !== -1) {
+            const selected = currentCompletions[selectedCompletionIndex];
+            if (selected) {
                 completeWith(selected);
-            completeWith(selected);
             }
             return;
         }
 
-        hide }
+        hideAutocomplete();
+
+        if (mode !== 'normal') {
+            handleInputInMode(trimmed);
             return;
         }
 
-Autocomplete        hideAutocomplete();
-
-       ();
-
-        if ( if (mode !== 'normalmode !== 'normal') {
-            handleInputIn') {
-            handleMode(InputInMode(trimmedtrimmed);
-            return;
-        }
-
-);
-            return;
-        }
-
-        commandHistory.push(trim        commandHistory.push(trimmed);
-med);
-        history        historyIndex = commandHistoryIndex = commandHistory.length;
-.length;
-        save        saveCommandHistoryCommandHistory();
-
-        const promptChar = authenticated ? `${currentLogin}@pc:~$` :();
+        commandHistory.push(trimmed);
+        historyIndex = commandHistory.length;
+        saveCommandHistory();
 
         const promptChar = authenticated ? `${currentLogin}@pc:~$` : '>';
- '>';
-        append        appendHistory(`${promptHistory(`${Char}promptChar} ${trim ${trimmed}`med}`);
+        appendHistory(`${promptChar} ${trimmed}`);
 
-       );
-
-        if (! if (!authenticated) {
-            handleauthenticated) {
-            handleUnauthenticatedUnauthenticatedCommand(trimmed);
-            commandInput.value =Command(trimmed);
+        if (!authenticated) {
+            handleUnauthenticatedCommand(trimmed);
             commandInput.value = '';
             render();
- '';
-            render();
-            return            return;
-       ;
+            return;
         }
-
-        const parts = trimmed.toLowerCase(). }
 
         const parts = trimmed.toLowerCase().split(' ');
-       split(' ');
-        const command = parts const command = parts[0[0];
-       ];
-        const args = parts const args = parts.slice(.slice(1);
+        const command = parts[0];
+        const args = parts.slice(1);
 
-        if1);
-
-        if (commands (commands[command]) {
-[command]) {
-            commands[command            commands[command](args);
-       ](args);
-        } else } else {
-            const twoWord = parts.slice(0,2 {
+        if (commands[command]) {
+            commands[command](args);
+        } else {
             const twoWord = parts.slice(0,2).join(' ');
-).join(' ');
-            if (commands            if[two (commands[twoWord])Word]) {
-                commands {
-               [twoWord](parts.slice( commands[twoWord](parts2));
-.slice(            }2));
+            if (commands[twoWord]) {
+                commands[twoWord](parts.slice(2));
             } else {
- else {
-                append                appendHistory(`History(`НеизНеизвестнаявестная команда: ${ команда: ${command}.command}. Введите "помощ Введите "помощь"ь" для списка команд для списка команд.`);
-.`);
-            }
+                appendHistory(`Неизвестная команда: ${command}. Введите "помощь" для списка команд.`);
             }
         }
-
-        commandInput.value        }
 
         commandInput.value = '';
         render();
-    = '';
-        render();
     }
 
+    function handleUnauthenticatedCommand(trimmed) {
+        const parts = trimmed.toLowerCase().split(' ');
+        const command = parts[0];
+        if (command === 'вход' || command === 'login') {
+            mode = 'awaiting_login';
+            appendHistory('Введите логин:');
+        } else if (command === 'регистрация' || command === 'register') {
+            mode = 'awaiting_register_login';
+            appendHistory('Придумайте логин:');
+        } else if (command === 'загрузить' && parts[1] === 'картинку') {
+            fileInput.accept = 'image/png, image/jpeg, image/gif, image/bmp, image/webp';
+            fileInput.click();
+        } else if (command === 'загрузить' && parts[1] === 'музыку') {
+            fileInput.accept = 'audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac';
+            fileInput.click();
+        } else if (command === 'прочитать' && parts[1] === 'картинку' && parts[2]) {
+            openMediaWindow('image', parts[2]);
+        } else if (command === 'прослушать' && parts[1] === 'музыку' && parts[2]) {
+            openMediaWindow('audio', parts[2]);
+        } else if (command === 'онлайн') {
+            fetchOnlineUsers();
+        } else {
+            appendHistory('Неизвестная команда. Доступные: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку [id], прослушать музыку [id], онлайн');
+        }
     }
 
-    function handle function handleUnauthenticatedUnauthenticatedCommand(Command(trimmedtrimmed) { /* ...) { /* ... без измен без изменений ... */ }
-ений ... */ }
-    function    function handleInput handleInputInModeInMode(input) { /* ... без(input) { /* ... без изменений изменений ... */ }
+    function handleInputInMode(input) {
+        if (mode === 'awaiting_login') {
+            tempLogin = input;
+            mode = 'awaiting_password';
+            appendHistory('Введите пароль:');
+        } else if (mode === 'awaiting_password') {
+            tempPassword = input;
+            performLogin(tempLogin, tempPassword);
+        } else if (mode === 'awaiting_register_login') {
+            tempLogin = input;
+            mode = 'awaiting_register_password';
+            appendHistory('Придумайте пароль:');
+        } else if (mode === 'awaiting_register_password') {
+            tempPassword = input;
+            performRegister(tempLogin, tempPassword);
+        }
+    }
 
-    ... */ }
+    // ---------- Инициализация ----------
+    setTimeout(checkSession, 100);
 
-    // --- Инициализация и обработ // --- Инициализация и обработчикичики ---
-    setTimeout ---
-(checkSession    setTimeout(checkSession, 100);
-
-    command, 100);
-
-Input.addEventListener    commandInput.addEventListener('input('input', ()', () => {
-        if => {
-        if (mode (mode !== 'normal') !== ' return;
-normal') return;
-        const val = commandInput.value.trim        const val =().toLowerCase();
- commandInput.value.trim().toLowerCase();
-        if        if (val.length < 2 (val.length < 2) {
-            hide) {
+    commandInput.addEventListener('input', () => {
+        if (mode !== 'normal') return;
+        const val = commandInput.value.trim().toLowerCase();
+        if (val.length < 2) {
             hideAutocomplete();
-           Autocomplete();
             return;
         }
- return;
-        }
-        const all =        const all = getAllCommands getAllCommands();
-        const complet();
-       ions = const completions = all.filter all.filter(cmd(cmd => cmd.includes(val => cmd.includes(val)).slice(0, )).slice(0, 20);
-        if20);
-        if (completions.length > (completions.length > 0 0) {
-) {
-            show            showAutocompleteAutocomplete(completions(completions);
-       );
+        const all = getAllCommands();
+        const completions = all.filter(cmd => cmd.includes(val)).slice(0, 20);
+        if (completions.length > 0) {
+            showAutocomplete(completions);
         } else {
-            hideAut } else {
             hideAutocomplete();
-ocomplete();
         }
     });
 
-    command        }
-    });
-
-    commandInput.addEventListenerInput.addEventListener('key('keydown', (edown', (e) => {
-       ) => {
-        const key const key = e = e.key;
-        const input = commandInput.key;
+    commandInput.addEventListener('keydown', (e) => {
+        const key = e.key;
         const input = commandInput;
 
-        if (autocomplete;
-
-        if (autocompleteMenu.classListMenu.classList.contains('visible')).contains('visible')) {
-            {
-            // ... обработка // ... обработка навига навигации ...
-ции ...
-            return            return;
-        }
-
-        if (;
-        }
-
-        if (e.e.ctrlKey && keyctrlKey && key === ' === 'v')v') {
-            e.preventDefault {
-            e.preventDefault();
-            navigator.clipboard.read();
-            navigator.clipboard.readText().then(textText().then(text => {
-                const => {
-                const start = start = input.se input.selectionStart;
-                const endlectionStart;
-                const end = input.selectionEnd;
-                const = input.selectionEnd;
-                const newValue newValue = input = input.value.substring(0, start.value.substring(0, start) +) + text + input.value text + input.value.substring(end);
-               .substring(end);
-                input.value = new input.value = newValue;
-Value;
-                input                input.setSelectionRange(start.setSelectionRange(start + text + text.length, start +.length, text.length);
-            start + text.length);
-            }).catch(err => }).catch {
-               (err => {
-                appendHistory appendHistory('Не('Не удалось вставить удалось текст: ' + err);
- вставить текст: ' + err);
-            });
-            });
-            return            return;
-        }
-
-        if (key ===;
-        }
-
-        if ( 'Enter') {
-key === 'Enter') {
-            e.preventDefault();
-            e.preventDefault();
-            executeCommand(input            executeCommand(input.value);
-.value);
-            return;
-        }
-
-                   return;
-        if ( }
-
-        if (key ===key === 'Tab 'Tab') {
-            e') {
-.preventDefault();
-            e.preventDefault();
-            handle            handleTab();
-Tab();
-            return;
-                   return;
-        }
-
-        }
-
-        if (key === if ( 'Arrowkey === 'ArrowUp')Up') {
-            e.preventDefault {
-            e.preventDefault();
-           ();
-            if (historyIndex >  if (historyIndex0) {
-                > 0) {
-                historyIndex--;
-                input.value = commandHistory historyIndex--;
-                input.value = commandHistory[historyIndex] || '';
-               [historyIndex] || '';
-                setTimeout(() setTimeout(() => input.setSelectionRange(input => input.setSelectionRange(input.value.length.value.length, input, input.value.length), .value.length), 0);
-            }
-0);
-            }
-            return            return;
-        }
-       ;
-        }
-        if (key === ' if (key ===ArrowDown') 'Arrow {
-           Down') {
-            e.preventDefault();
-            e.preventDefault();
-            if (historyIndex if (historyIndex < commandHistory.length < commandHistory.length - 1) {
-                historyIndex - 1) {
-                historyIndex++;
-                input.value = commandHistory++;
-                input.value = commandHistory[historyIndex[historyIndex] || '';
-               ] || setTimeout(() => input '';
-                setTimeout(() => input.setSelectionRange.setSelectionRange(input.value.length(input.value.length, input, input.value.length), .value.length), 0);
-            }0);
-            } else {
-                history else {
-                historyIndex = commandHistoryIndex = commandHistory.length;
-                input.length;
-                input.value =.value = '';
-            '';
-            }
-            return;
- }
-            return;
-        }
-    });
-
-    file        }
-    });
-
-Input.addEventListener('change', (e) => {
-    fileInput.addEventListener('change', (e) => {
-        const file = e.target        const file =.files e.target.files[0[0];
-        if (];
-        if (file)file) {
-            {
-            if (!authenticated if (!authenticated) {
-) {
-                append                appendHistory('ОшибHistory('Ошибка:ка: необходимо войти в систему для загруз необходимо войти в систему для загрузки файлов.');
-ки файлов.');
+        if (autocompleteMenu.classList.contains('visible')) {
+            if (key === 'ArrowUp') {
+                e.preventDefault();
+                if (selectedCompletionIndex > 0) {
+                    selectedCompletionIndex--;
+                } else {
+                    selectedCompletionIndex = currentCompletions.length - 1;
+                }
+                let categorized = {};
+                for (let cmd of currentCompletions) {
+                    let found = false;
+                    for (let [cat, cmds] of Object.entries(commandCategories)) {
+                        if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && !cmd.startsWith('загрузить') && !cmd.startsWith('прочитать') && cmd !== 'открепить' && cmd !== 'аватар')) {
+                            if (!categorized[cat]) categorized[cat] = [];
+                            categorized[cat].push(cmd);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        if (!categorized['Прочее']) categorized['Прочее'] = [];
+                        categorized['Прочее'].push(cmd);
+                    }
+                }
+                renderAutocomplete(categorized);
                 return;
-                           return;
             }
+            if (key === 'ArrowDown') {
+                e.preventDefault();
+                if (selectedCompletionIndex < currentCompletions.length - 1) {
+                    selectedCompletionIndex++;
+                } else {
+                    selectedCompletionIndex = 0;
+                }
+                let categorized = {};
+                for (let cmd of currentCompletions) {
+                    let found = false;
+                    for (let [cat, cmds] of Object.entries(commandCategories)) {
+                        if (cmds.includes(cmd) || (cat === 'Основные' && !cmds.includes(cmd) && !cmd.startsWith('канал ') && !cmd.startsWith('загрузить') && !cmd.startsWith('прочитать') && cmd !== 'открепить' && cmd !== 'аватар')) {
+                            if (!categorized[cat]) categorized[cat] = [];
+                            categorized[cat].push(cmd);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        if (!categorized['Прочее']) categorized['Прочее'] = [];
+                        categorized['Прочее'].push(cmd);
+                    }
+                }
+                renderAutocomplete(categorized);
+                return;
+            }
+            if (key === 'Enter' || key === 'Tab') {
+                e.preventDefault();
+                if (selectedCompletionIndex !== -1) {
+                    completeWith(currentCompletions[selectedCompletionIndex]);
+                } else {
+                    hideAutocomplete();
+                }
+                return;
+            }
+            if (key === 'Escape') {
+                e.preventDefault();
+                hideAutocomplete();
+                return;
+            }
+        }
+
+        if (e.ctrlKey && key === 'v') {
+            e.preventDefault();
+            navigator.clipboard.readText().then(text => {
+                const start = input.selectionStart;
+                const end = input.selectionEnd;
+                const newValue = input.value.substring(0, start) + text + input.value.substring(end);
+                input.value = newValue;
+                input.setSelectionRange(start + text.length, start + text.length);
+            }).catch(err => {
+                appendHistory('Не удалось вставить текст: ' + err);
+            });
+            return;
+        }
+
+        if (key === 'Enter') {
+            e.preventDefault();
+            executeCommand(input.value);
+            return;
+        }
+
+        if (key === 'Tab') {
+            e.preventDefault();
+            handleTab();
+            return;
+        }
+
+        if (key === 'ArrowUp') {
+            e.preventDefault();
+            if (historyIndex > 0) {
+                historyIndex--;
+                input.value = commandHistory[historyIndex] || '';
+                setTimeout(() => input.setSelectionRange(input.value.length, input.value.length), 0);
+            }
+            return;
+        }
+        if (key === 'ArrowDown') {
+            e.preventDefault();
+            if (historyIndex < commandHistory.length - 1) {
+                historyIndex++;
+                input.value = commandHistory[historyIndex] || '';
+                setTimeout(() => input.setSelectionRange(input.value.length, input.value.length), 0);
+            } else {
+                historyIndex = commandHistory.length;
+                input.value = '';
+            }
+            return;
+        }
+    });
+
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            if (!authenticated) {
+                appendHistory('Ошибка: необходимо войти в систему для загрузки файлов.');
+                return;
             }
             uploadFile(file);
- uploadFile(file);
         }
-        file        }
         fileInput.value = '';
     });
 
-    documentInput.value = '';
+    document.getElementById('terminalContainer').addEventListener('click', () => commandInput.focus());
+
+    commandInput.addEventListener('blur', () => {
+        setTimeout(() => hideAutocomplete(), 200);
     });
-
-    document.getElementById('.getElementById('terminalContainer').addterminalContainer').addEventListener('click', () =>EventListener(' commandInputclick', () => commandInput.focus());
-
-   .focus commandInput.addEventListener('());
-
-    commandInput.addEventListener('blur', ()blur', () => {
- => {
-        setTimeout(() =>        setTimeout(() => hideAut hideAutocomplete(),ocomplete(), 200);
-    200 });
-
-   );
-    });
-
-    window.open window.openMediaWindow = openMediaWindowMediaWindow = openMediaWindow;
-
-   ;
 
     render();
 })();
- render();
