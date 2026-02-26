@@ -7,7 +7,7 @@ import logging
 import magic
 import jwt
 from functools import wraps
-from flask import Flask, request, jsonify, g, send_from_directory, abort
+from flask import Flask, request, jsonify, g, send_from_directory, abort, Response
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_limiter import Limiter
@@ -21,18 +21,10 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
 app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', app.config['SECRET_KEY'])
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
-ALLOWED_MIME_TYPES = {
-    'image/png', 'image/jpeg', 'image/gif', 'image/bmp', 'image/webp',
-    'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/flac'
-}
-EXTENSION_TO_MIME = {
-    'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-    'gif': 'image/gif', 'bmp': 'image/bmp', 'webp': 'image/webp',
-    'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
-    'm4a': 'audio/mp4', 'flac': 'audio/flac'
-}
+# Разрешаем любые MIME-типы (сняты ограничения)
+ALLOWED_MIME_TYPES = None  # отключаем проверку
 
-CORS(app, origins=["http://localhost:5000", "http://127.0.0.1:5000"])  # Укажите свои домены
+CORS(app, origins=["http://localhost:5000", "http://127.0.0.1:5000"])
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -83,7 +75,7 @@ def init_db():
                 registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 avatar_id INTEGER,
-                color_pref TEXT DEFAULT 'зеленый',
+                color_pref TEXT DEFAULT 'белый',
                 FOREIGN KEY(avatar_id) REFERENCES images(id)
             )
         ''')
@@ -153,7 +145,7 @@ def init_db():
                 FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
             )
         ''')
-        # Изображения
+        # Изображения (теперь универсальное хранилище файлов)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS images (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,10 +153,11 @@ def init_db():
                 stored_filename TEXT NOT NULL UNIQUE,
                 uploader_id INTEGER NOT NULL,
                 uploaded TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                file_type TEXT DEFAULT 'image',  -- image, audio, text, etc.
                 FOREIGN KEY(uploader_id) REFERENCES users(id)
             )
         ''')
-        # Аудио
+        # Аудио (оставляем для обратной совместимости, но новые файлы будем сохранять в images)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS audio (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,6 +166,7 @@ def init_db():
                 uploader_id INTEGER NOT NULL,
                 uploaded TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 duration INTEGER,
+                file_type TEXT DEFAULT 'audio',
                 FOREIGN KEY(uploader_id) REFERENCES users(id)
             )
         ''')
@@ -246,12 +240,12 @@ def owns_media(media_type):
     def decorator(f):
         @wraps(f)
         def decorated(media_id, *args, **kwargs):
-            # Пользователь уже должен быть аутентифицирован через token_required
             user_id = g.user['id']
             db = get_db()
-            if media_type == 'image':
-                media = db.execute('SELECT * FROM images WHERE id = ?', (media_id,)).fetchone()
-            else:
+            # Ищем в таблице images
+            media = db.execute('SELECT * FROM images WHERE id = ?', (media_id,)).fetchone()
+            if not media:
+                # Если не нашли, пробуем в audio
                 media = db.execute('SELECT * FROM audio WHERE id = ?', (media_id,)).fetchone()
             if not media:
                 abort(404)
@@ -262,30 +256,19 @@ def owns_media(media_type):
                 return f(media_id, *args, **kwargs)
 
             # Проверяем, участвует ли пользователь в диалогах/каналах, где использовался этот файл
-            if media_type == 'image':
-                # Проверка личных сообщений
+            # Для упрощения считаем, что если файл использован в сообщении, где пользователь участник, то доступ есть
+            # Проверка личных сообщений
+            msg = db.execute('''
+                SELECT 1 FROM messages
+                WHERE (image_id = ? OR audio_id = ?) AND (from_id = ? OR to_id = ?)
+            ''', (media_id, media_id, user_id, user_id)).fetchone()
+            if not msg:
+                # Проверка сообщений каналов
                 msg = db.execute('''
-                    SELECT 1 FROM messages
-                    WHERE image_id = ? AND (from_id = ? OR to_id = ?)
-                ''', (media_id, user_id, user_id)).fetchone()
-                if not msg:
-                    # Проверка сообщений каналов
-                    msg = db.execute('''
-                        SELECT 1 FROM channel_messages cm
-                        JOIN channel_subscribers cs ON cm.channel_id = cs.channel_id
-                        WHERE cm.image_id = ? AND cs.user_id = ?
-                    ''', (media_id, user_id)).fetchone()
-            else:  # audio
-                msg = db.execute('''
-                    SELECT 1 FROM messages
-                    WHERE audio_id = ? AND (from_id = ? OR to_id = ?)
-                ''', (media_id, user_id, user_id)).fetchone()
-                if not msg:
-                    msg = db.execute('''
-                        SELECT 1 FROM channel_messages cm
-                        JOIN channel_subscribers cs ON cm.channel_id = cs.channel_id
-                        WHERE cm.audio_id = ? AND cs.user_id = ?
-                    ''', (media_id, user_id)).fetchone()
+                    SELECT 1 FROM channel_messages cm
+                    JOIN channel_subscribers cs ON cm.channel_id = cs.channel_id
+                    WHERE (cm.image_id = ? OR cm.audio_id = ?) AND cs.user_id = ?
+                ''', (media_id, media_id, user_id)).fetchone()
 
             if not msg:
                 abort(403)
@@ -296,19 +279,21 @@ def owns_media(media_type):
     return decorator
 
 # ---------- Вспомогательные функции ----------
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in EXTENSION_TO_MIME
-
-def validate_mime(file):
-    mime = magic.from_buffer(file.read(2048), mime=True)
-    file.seek(0)
-    return mime in ALLOWED_MIME_TYPES
+def get_file_mime(filename):
+    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+    mime_map = {
+        'txt': 'text/plain',
+        'md': 'text/markdown',
+        'json': 'application/json',
+        'pdf': 'application/pdf',
+        # можно добавить другие
+    }
+    return mime_map.get(ext, 'application/octet-stream')
 
 def sanitize_image(file_path):
     """Удаляет метаданные из изображения, пересохраняя его."""
     try:
         img = Image.open(file_path)
-        # Сохраняем без метаданных
         img.save(file_path, format=img.format)
     except Exception as e:
         logger.error(f"Image sanitization failed: {e}")
@@ -403,7 +388,7 @@ def save_message(from_id, to_id, content, image_id=None, audio_id=None):
     if image_id:
         img = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, from_id)).fetchone()
         if not img:
-            raise ValueError("Изображение не найдено или не принадлежит вам")
+            raise ValueError("Файл не найден или не принадлежит вам")
     if audio_id:
         aud = db.execute('SELECT id FROM audio WHERE id = ? AND uploader_id = ?', (audio_id, from_id)).fetchone()
         if not aud:
@@ -448,7 +433,7 @@ def add_channel_message(channel_id, user_id, content, image_id=None, audio_id=No
     if image_id:
         img = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, user_id)).fetchone()
         if not img:
-            raise ValueError("Изображение не найдено или не принадлежит вам")
+            raise ValueError("Файл не найден или не принадлежит вам")
     if audio_id:
         aud = db.execute('SELECT id FROM audio WHERE id = ? AND uploader_id = ?', (audio_id, user_id)).fetchone()
         if not aud:
@@ -608,7 +593,6 @@ def login():
     try:
         user = get_user_by_login(login)
         if not user or not check_password_hash(user['password_hash'], password):
-            # Добавляем небольшую задержку для защиты от перебора
             import time
             time.sleep(1)
             return jsonify({'error': 'Неверный логин или пароль'}), 401
@@ -760,7 +744,7 @@ def channel_read():
             for msg in messages:
                 line = f'[{msg["timestamp"]}] {msg["user_login"]}: {msg["content"]}'
                 if msg['image_id']:
-                    line += f' [Изображение ID: {msg["image_id"]}]'
+                    line += f' [Файл ID: {msg["image_id"]}]'
                 if msg['audio_id']:
                     line += f' [Аудио ID: {msg["audio_id"]}]'
                 result_lines.append(line)
@@ -802,7 +786,7 @@ def handle_command():
             image_id = args.get('image_id')
             audio_id = args.get('audio_id')
             if not to_id or (not message and not image_id and not audio_id):
-                result_lines.append('Ошибка: укажите ID получателя и сообщение, изображение или аудио.')
+                result_lines.append('Ошибка: укажите ID получателя и сообщение или файл.')
             else:
                 if int(to_id) == user_id:
                     result_lines.append('Ошибка: нельзя отправить сообщение самому себе.')
@@ -838,16 +822,16 @@ def handle_command():
         elif command == 'аватар':
             image_id = args.get('image_id')
             if not image_id:
-                result_lines.append('Ошибка: укажите ID изображения.')
+                result_lines.append('Ошибка: укажите ID файла.')
             else:
                 db = get_db()
                 cursor = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, user_id))
                 if not cursor.fetchone():
-                    result_lines.append('Ошибка: изображение не найдено или вы не являетесь его владельцем.')
+                    result_lines.append('Ошибка: файл не найден или вы не являетесь его владельцем.')
                 else:
                     db.execute('UPDATE users SET avatar_id = ? WHERE id = ?', (image_id, user_id))
                     db.commit()
-                    result_lines.append(f'Аватар установлен. ID изображения: {image_id}')
+                    result_lines.append(f'Аватар установлен. ID файла: {image_id}')
                     update_last_seen(user_id)
         elif command == 'пинг':
             result_lines.append('понг')
@@ -887,7 +871,7 @@ def set_color():
     color = data.get('color')
     if not color:
         return jsonify({'error': 'Не указан цвет'}), 400
-    valid_colors = ['зеленый', 'красный', 'синий', 'желтый', 'оранжевый', 'розовый', 'голубой']
+    valid_colors = ['зеленый', 'красный', 'синий', 'желтый', 'оранжевый', 'розовый', 'голубой', 'белый']
     if color not in valid_colors:
         return jsonify({'error': f'Недопустимый цвет. Доступны: {", ".join(valid_colors)}'}), 400
     try:
@@ -901,7 +885,7 @@ def set_color():
         return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/upload_image', methods=['POST'])
-@limiter.limit("3 per minute")  # Лимит на загрузку
+@limiter.limit("10 per minute")
 @token_required
 def upload_image():
     user_id = g.user['id']
@@ -910,54 +894,60 @@ def upload_image():
     file = request.files['image']
     if file.filename == '':
         return jsonify({'error': 'Файл не выбран'}), 400
-    if not allowed_file(file.filename):
-        return jsonify({'error': 'Недопустимый тип файла по расширению'}), 400
-    if not validate_mime(file):
-        return jsonify({'error': 'Недопустимый MIME-тип файла'}), 400
 
-    ext = file.filename.rsplit('.', 1)[1].lower()
+    ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
     stored_filename = f"{uuid.uuid4().hex}.{ext}"
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
     file.save(file_path)
 
-    # Очистка изображений от метаданных
-    mime_type = EXTENSION_TO_MIME.get(ext, 'application/octet-stream')
-    if mime_type.startswith('image/'):
+    # Определяем MIME-тип
+    mime = magic.from_file(file_path, mime=True)
+    # Определяем тип файла для клиента
+    if mime.startswith('image/'):
+        file_type = 'image'
+        # Очистка изображений от метаданных
         sanitize_image(file_path)
+    elif mime.startswith('audio/'):
+        file_type = 'audio'
+    elif mime.startswith('text/'):
+        file_type = 'text'
+    else:
+        file_type = 'other'
 
     db = get_db()
     cursor = db.cursor()
-    if mime_type.startswith('audio/'):
-        cursor.execute('''
-            INSERT INTO audio (original_filename, stored_filename, uploader_id)
-            VALUES (?, ?, ?)
-        ''', (file.filename, stored_filename, user_id))
-        db.commit()
-        media_id = cursor.lastrowid
-        media_type = 'audio'
-    else:
-        cursor.execute('''
-            INSERT INTO images (original_filename, stored_filename, uploader_id)
-            VALUES (?, ?, ?)
-        ''', (file.filename, stored_filename, user_id))
-        db.commit()
-        media_id = cursor.lastrowid
-        media_type = 'image'
+    # Сохраняем в таблицу images (универсальное хранилище)
+    cursor.execute('''
+        INSERT INTO images (original_filename, stored_filename, uploader_id, file_type)
+        VALUES (?, ?, ?, ?)
+    ''', (file.filename, stored_filename, user_id, file_type))
+    db.commit()
+    media_id = cursor.lastrowid
 
-    logger.info(f"File uploaded: {file.filename} (ID: {media_id}, type: {media_type}) by user {user_id}")
-    return jsonify({'result': {'media_id': media_id, 'type': media_type}, 'error': None})
+    logger.info(f"File uploaded: {file.filename} (ID: {media_id}, type: {file_type}) by user {user_id}")
+    return jsonify({'result': {'media_id': media_id, 'type': file_type}, 'error': None})
 
-@app.route('/image/<int:image_id>')
+@app.route('/file/<int:file_id>')
 @token_required
-@owns_media('image')
-def get_image(image_id):
+@owns_media('any')  # декоратор универсальный
+def get_file(file_id):
     return send_from_directory(app.config['UPLOAD_FOLDER'], g.media['stored_filename'])
 
-@app.route('/audio/<int:audio_id>')
+@app.route('/file_text/<int:file_id>')
 @token_required
-@owns_media('audio')
-def get_audio(audio_id):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], g.media['stored_filename'])
+@owns_media('any')
+def get_file_text(file_id):
+    # Проверяем, что файл текстовый
+    if g.media['file_type'] not in ('text', 'other') or not g.media['stored_filename'].endswith('.txt'):
+        abort(400, description="Файл не является текстовым")
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], g.media['stored_filename'])
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return Response(content, mimetype='text/plain; charset=utf-8')
+    except Exception as e:
+        logger.error(f"Error reading text file: {e}")
+        abort(500)
 
 @app.route('/')
 def index():
@@ -977,14 +967,12 @@ def handle_authenticate(data):
     token = data.get('token')
     user_id = decode_token(token)
     if user_id:
-        # Сохраняем user_id в комнате
         join_room(f'user_{user_id}')
         logger.info(f'User {user_id} authenticated and joined room')
         emit('authenticated', {'status': 'ok'})
     else:
         emit('authenticated', {'status': 'error'})
 
-# Для обратной совместимости старый метод subscribe тоже можно оставить с проверкой
 @socketio.on('subscribe')
 def handle_subscribe(data):
     token = data.get('token')
