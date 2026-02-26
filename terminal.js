@@ -2,6 +2,7 @@
 (function() {
     const API_BASE = '';
 
+    // ---------- Элементы DOM ----------
     const outputArea = document.getElementById('outputArea');
     const promptSpan = document.getElementById('prompt');
     const commandInput = document.getElementById('commandInput');
@@ -9,8 +10,8 @@
     const autocompleteMenu = document.getElementById('autocompleteMenu');
     const windowsContainer = document.getElementById('windowsContainer');
 
-    // Состояние
-    let history = [];
+    // ---------- Состояние ----------
+    let history = [];                      // массив объектов {text, fileId}
     let commandHistory = [];
     let historyIndex = 0;
     let authenticated = false;
@@ -21,9 +22,8 @@
     let tempLogin = '';
     let tempPassword = '';
     let autoReadEnabled = false;
-    let pendingImageId = null;
-    let pendingAudioId = null;
-    let currentColor = 'белый';          // по умолчанию белый
+    let pendingFileId = null;               // для прикрепления файла к сообщению
+    let currentColor = 'белый';
     let lastUnreadHash = null;
 
     let currentCompletions = [];
@@ -31,7 +31,7 @@
 
     let socket = null;
 
-    // Цвета (добавлен белый)
+    // ---------- Константы ----------
     const colorMap = {
         'зеленый': '#00ff00',
         'красный': '#ff0000',
@@ -47,12 +47,12 @@
     const commandCategories = {
         'Основные': ['написать', 'профиль', 'пинг', 'мойид', 'непрочитанные', 'прочитать', 'прочитать всё', 'помощь', 'выход', 'онлайн', 'каналы', 'цвет', 'автопрочтение'],
         'Каналы': ['канал создать', 'канал подписаться', 'канал отписаться', 'канал написать', 'канал прочитать', 'канал удалить'],
-        'Медиа': ['загрузить картинку', 'загрузить музыку', 'прочитать картинку', 'прослушать музыку', 'открепить', 'аватар']
+        'Медиа': ['загрузить', 'прочитать файл', 'открепить', 'аватар']
     };
 
     const initialLines = [
         'Добро пожаловать в терминал.',
-        'Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн',
+        'Доступные команды: вход, регистрация, загрузить, прочитать файл, онлайн',
         ''
     ];
     history.push(...initialLines.map(text => ({ text })));
@@ -90,11 +90,8 @@
         for (let lineObj of history) {
             let escaped = escapeHTML(lineObj.text);
             let linked = linkify(escaped);
-            if (lineObj.imageId) {
-                linked += ` <span class="media-link" onclick="window.openMediaWindow('image', ${lineObj.imageId})">[Изображение ID: ${lineObj.imageId}]</span>`;
-            }
-            if (lineObj.audioId) {
-                linked += ` <div class="retro-audio"><audio controls src="/audio/${lineObj.audioId}"></audio><span class="audio-label">ID: ${lineObj.audioId}</span></div>`;
+            if (lineObj.fileId) {
+                linked += ` <span class="media-link" onclick="window.openFileWindow(${lineObj.fileId})">[Файл ID: ${lineObj.fileId}]</span>`;
             }
             html += `<div class="output-line">${linked}</div>`;
         }
@@ -103,8 +100,8 @@
         updatePrompt();
     }
 
-    function appendHistory(text, imageId = null, audioId = null) {
-        history.push({ text, imageId, audioId });
+    function appendHistory(text, fileId = null) {
+        history.push({ text, fileId });
         render();
     }
 
@@ -116,43 +113,136 @@
         render();
     }
 
-    // ---------- Окна с медиа (поддержка touch) ----------
-    window.openMediaWindow = function(type, id) {
-        const url = type === 'image' ? `/image/${id}` : `/audio/${id}`;
-        const title = type === 'image' ? `Изображение ID: ${id}` : `Аудио ID: ${id}`;
+    // ---------- Универсальная функция перетаскивания окон ----------
+    function makeWindowDraggable(win, handle) {
+        let isDragging = false;
+        let offsetX, offsetY;
+        const closeBtn = handle.querySelector('.close-btn');
 
+        const startDrag = (clientX, clientY) => {
+            const rect = win.getBoundingClientRect();
+            offsetX = clientX - rect.left;
+            offsetY = clientY - rect.top;
+            isDragging = true;
+            win.style.cursor = 'move';
+        };
+
+        const onDrag = (clientX, clientY) => {
+            if (!isDragging) return;
+            const containerRect = windowsContainer.getBoundingClientRect();
+            let newLeft = clientX - offsetX - containerRect.left;
+            let newTop = clientY - offsetY - containerRect.top;
+            newLeft = Math.max(0, Math.min(containerRect.width - win.offsetWidth, newLeft));
+            newTop = Math.max(0, Math.min(containerRect.height - win.offsetHeight, newTop));
+            win.style.left = newLeft + 'px';
+            win.style.top = newTop + 'px';
+        };
+
+        const stopDrag = () => {
+            isDragging = false;
+            win.style.cursor = 'default';
+        };
+
+        handle.addEventListener('mousedown', (e) => {
+            if (e.target === closeBtn) return;
+            e.preventDefault();
+            startDrag(e.clientX, e.clientY);
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            onDrag(e.clientX, e.clientY);
+        });
+
+        document.addEventListener('mouseup', stopDrag);
+
+        handle.addEventListener('touchstart', (e) => {
+            if (e.target === closeBtn) return;
+            e.preventDefault();
+            const touch = e.touches[0];
+            startDrag(touch.clientX, touch.clientY);
+        }, { passive: false });
+
+        document.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            onDrag(touch.clientX, touch.clientY);
+        }, { passive: false });
+
+        document.addEventListener('touchend', stopDrag);
+    }
+
+    // ---------- Окно для файлов (изображения, аудио, другие) ----------
+    window.openFileWindow = async function(fileId) {
+        // Сначала пытаемся получить информацию о файле через HEAD-запрос
+        try {
+            const resp = await fetch(`/file/${fileId}`, {
+                method: 'HEAD',
+                headers: { 'Authorization': token ? `Bearer ${token}` : '' }
+            });
+            const contentType = resp.headers.get('content-type');
+            if (contentType && contentType.startsWith('text/')) {
+                // Текстовый файл – открываем блокнот
+                await openTextWindow(fileId);
+            } else if (contentType && contentType.startsWith('image/')) {
+                // Изображение
+                createMediaWindow('image', fileId, contentType);
+            } else if (contentType && contentType.startsWith('audio/')) {
+                // Аудио
+                createMediaWindow('audio', fileId, contentType);
+            } else {
+                // Неизвестный тип – показываем ссылку на скачивание
+                createDownloadWindow(fileId, contentType || 'application/octet-stream');
+            }
+        } catch (err) {
+            appendHistory(`Ошибка открытия файла: ${err.message}`);
+        }
+    };
+
+    async function openTextWindow(fileId) {
+        try {
+            const resp = await fetch(`/file_text/${fileId}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!resp.ok) throw new Error(`Ошибка загрузки текста: ${resp.status}`);
+            const text = await resp.text();
+            createNotepadWindow(fileId, text);
+        } catch (err) {
+            appendHistory(`Не удалось открыть текстовый файл: ${err.message}`);
+        }
+    }
+
+    function createNotepadWindow(fileId, content) {
+        const title = `Блокнот (ID: ${fileId})`;
         const win = document.createElement('div');
         win.className = 'retro-window';
         win.style.left = '50px';
         win.style.top = '50px';
-        win.style.width = type === 'image' ? '400px' : '300px';
-        win.style.height = type === 'image' ? '300px' : '150px';
+        win.style.width = '500px';
+        win.style.height = '400px';
+        win.style.zIndex = Date.now();
 
         const titleBar = document.createElement('div');
         titleBar.className = 'title-bar';
         titleBar.innerHTML = `<span class="title">${title}</span><span class="close-btn">×</span>`;
 
-        const content = document.createElement('div');
-        content.className = 'window-content';
-        if (type === 'image') {
-            const img = document.createElement('img');
-            img.src = url;
-            img.alt = title;
-            img.onerror = () => { content.innerHTML = '<p style="color:red">Ошибка загрузки изображения</p>'; };
-            content.appendChild(img);
-        } else {
-            const retroDiv = document.createElement('div');
-            retroDiv.className = 'retro-audio';
-            const audio = document.createElement('audio');
-            audio.controls = true;
-            audio.src = url;
-            audio.onerror = () => { content.innerHTML = '<p style="color:red">Ошибка загрузки аудио</p>'; };
-            retroDiv.appendChild(audio);
-            content.appendChild(retroDiv);
-        }
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'window-content';
+        const pre = document.createElement('pre');
+        pre.style.whiteSpace = 'pre-wrap';
+        pre.style.wordWrap = 'break-word';
+        pre.style.fontFamily = 'monospace';
+        pre.style.fontSize = '14px';
+        pre.style.color = '#f0f0f0';
+        pre.style.backgroundColor = '#000';
+        pre.style.padding = '10px';
+        pre.style.margin = '0';
+        pre.style.overflow = 'auto';
+        pre.style.height = 'calc(100% - 20px)';
+        pre.textContent = content;
+        contentDiv.appendChild(pre);
 
         win.appendChild(titleBar);
-        win.appendChild(content);
+        win.appendChild(contentDiv);
         windowsContainer.appendChild(win);
 
         const closeBtn = titleBar.querySelector('.close-btn');
@@ -161,70 +251,97 @@
             win.remove();
         });
 
-        // Перетаскивание мышью
-        let isDragging = false;
-        let offsetX, offsetY;
+        makeWindowDraggable(win, titleBar);
+    }
 
-        titleBar.addEventListener('mousedown', (e) => {
-            if (e.target === closeBtn) return;
-            isDragging = true;
-            const rect = win.getBoundingClientRect();
-            offsetX = e.clientX - rect.left;
-            offsetY = e.clientY - rect.top;
-            win.style.cursor = 'move';
-            e.preventDefault();
+    function createMediaWindow(type, fileId, contentType) {
+        const title = type === 'image' ? `Изображение ID: ${fileId}` : `Аудио ID: ${fileId}`;
+        const win = document.createElement('div');
+        win.className = 'retro-window';
+        win.style.left = '50px';
+        win.style.top = '50px';
+        win.style.width = type === 'image' ? '400px' : '300px';
+        win.style.height = type === 'image' ? '300px' : '150px';
+        win.style.zIndex = Date.now();
+
+        const titleBar = document.createElement('div');
+        titleBar.className = 'title-bar';
+        titleBar.innerHTML = `<span class="title">${title}</span><span class="close-btn">×</span>`;
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'window-content';
+        const url = `/file/${fileId}`;
+
+        if (type === 'image') {
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = title;
+            img.onerror = () => { contentDiv.innerHTML = '<p style="color:red">Ошибка загрузки изображения</p>'; };
+            contentDiv.appendChild(img);
+        } else {
+            const retroDiv = document.createElement('div');
+            retroDiv.className = 'retro-audio';
+            const audio = document.createElement('audio');
+            audio.controls = true;
+            audio.src = url;
+            audio.onerror = () => { contentDiv.innerHTML = '<p style="color:red">Ошибка загрузки аудио</p>'; };
+            retroDiv.appendChild(audio);
+            contentDiv.appendChild(retroDiv);
+        }
+
+        win.appendChild(titleBar);
+        win.appendChild(contentDiv);
+        windowsContainer.appendChild(win);
+
+        const closeBtn = titleBar.querySelector('.close-btn');
+        closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            win.remove();
         });
 
-        document.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            const containerRect = windowsContainer.getBoundingClientRect();
-            let newLeft = e.clientX - offsetX - containerRect.left;
-            let newTop = e.clientY - offsetY - containerRect.top;
-            newLeft = Math.max(0, Math.min(containerRect.width - win.offsetWidth, newLeft));
-            newTop = Math.max(0, Math.min(containerRect.height - win.offsetHeight, newTop));
-            win.style.left = newLeft + 'px';
-            win.style.top = newTop + 'px';
+        makeWindowDraggable(win, titleBar);
+    }
+
+    function createDownloadWindow(fileId, mime) {
+        const title = `Файл ID: ${fileId}`;
+        const win = document.createElement('div');
+        win.className = 'retro-window';
+        win.style.left = '50px';
+        win.style.top = '50px';
+        win.style.width = '300px';
+        win.style.height = '150px';
+        win.style.zIndex = Date.now();
+
+        const titleBar = document.createElement('div');
+        titleBar.className = 'title-bar';
+        titleBar.innerHTML = `<span class="title">${title}</span><span class="close-btn">×</span>`;
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'window-content';
+        contentDiv.style.display = 'flex';
+        contentDiv.style.alignItems = 'center';
+        contentDiv.style.justifyContent = 'center';
+
+        const link = document.createElement('a');
+        link.href = `/file/${fileId}`;
+        link.target = '_blank';
+        link.textContent = 'Скачать файл';
+        link.style.color = '#00ff00';
+        link.style.fontSize = '16px';
+        contentDiv.appendChild(link);
+
+        win.appendChild(titleBar);
+        win.appendChild(contentDiv);
+        windowsContainer.appendChild(win);
+
+        const closeBtn = titleBar.querySelector('.close-btn');
+        closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            win.remove();
         });
 
-        document.addEventListener('mouseup', () => {
-            if (isDragging) {
-                isDragging = false;
-                win.style.cursor = 'default';
-            }
-        });
-
-        // Перетаскивание касанием (touch)
-        titleBar.addEventListener('touchstart', (e) => {
-            if (e.target === closeBtn) return;
-            e.preventDefault();
-            const touch = e.touches[0];
-            isDragging = true;
-            const rect = win.getBoundingClientRect();
-            offsetX = touch.clientX - rect.left;
-            offsetY = touch.clientY - rect.top;
-            win.style.cursor = 'move';
-        }, { passive: false });
-
-        document.addEventListener('touchmove', (e) => {
-            if (!isDragging) return;
-            e.preventDefault();
-            const touch = e.touches[0];
-            const containerRect = windowsContainer.getBoundingClientRect();
-            let newLeft = touch.clientX - offsetX - containerRect.left;
-            let newTop = touch.clientY - offsetY - containerRect.top;
-            newLeft = Math.max(0, Math.min(containerRect.width - win.offsetWidth, newLeft));
-            newTop = Math.max(0, Math.min(containerRect.height - win.offsetHeight, newTop));
-            win.style.left = newLeft + 'px';
-            win.style.top = newTop + 'px';
-        }, { passive: false });
-
-        document.addEventListener('touchend', () => {
-            if (isDragging) {
-                isDragging = false;
-                win.style.cursor = 'default';
-            }
-        });
-    };
+        makeWindowDraggable(win, titleBar);
+    }
 
     // ---------- Сессия ----------
     function saveSession(token, userId, login, color) {
@@ -324,7 +441,7 @@
         }
     }
 
-    // ---------- API запросы ----------
+    // ---------- API запросы с токеном ----------
     async function apiRequest(method, endpoint, body = null) {
         const options = {
             method,
@@ -338,6 +455,11 @@
         }
         try {
             const resp = await fetch(`${API_BASE}${endpoint}`, options);
+            const contentType = resp.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await resp.text();
+                throw new Error(`Сервер вернул не JSON (статус ${resp.status}): ${text.substring(0, 200)}`);
+            }
             const data = await resp.json();
             if (!resp.ok || data.error) {
                 throw new Error(data.error || `HTTP ${resp.status}`);
@@ -388,7 +510,9 @@
             appendHistory('📨 Автоматически прочитанные личные сообщения:');
             data.result.forEach(msg => {
                 let line = `[${msg.timestamp}] ${msg.from_login} (${msg.from_id}): ${msg.content}`;
-                appendHistory(line, msg.image_id, msg.audio_id);
+                // Определяем, какой ID файла передан
+                const fileId = msg.image_id || msg.audio_id;
+                appendHistory(line, fileId);
             });
         }
     }
@@ -419,7 +543,8 @@
                 }
                 messages.forEach(msg => {
                     let line = `[${msg.timestamp}] ${msg.from_login} (${msg.from_id}): ${msg.content}`;
-                    appendHistory(line, msg.image_id, msg.audio_id);
+                    const fileId = msg.image_id || msg.audio_id;
+                    appendHistory(line, fileId);
                 });
             } else {
                 appendHistory('Нет личных сообщений для отображения.');
@@ -457,12 +582,12 @@
         }
     }
 
-    async function channelSend(name, message, imageId = null, audioId = null) {
+    async function channelSend(name, message, fileId = null) {
         const data = await apiRequest('POST', '/channel/send', {
             channel_name: name,
             content: message,
-            image_id: imageId,
-            audio_id: audioId
+            image_id: fileId,   // сервер ожидает image_id или audio_id, но мы передаём fileId
+            audio_id: fileId    // один из них будет проигнорирован, если не соответствует типу
         });
         if (data) {
             data.result.forEach(line => appendHistory(line));
@@ -486,12 +611,11 @@
             currentUserId = user.id;
             currentLogin = user.login;
             autoReadEnabled = false;
-            pendingImageId = null;
-            pendingAudioId = null;
+            pendingFileId = null;
             if (user.color_pref) {
                 setTextColor(user.color_pref);
             } else {
-                setTextColor('белый');  // по умолчанию белый
+                setTextColor('белый');
             }
             appendHistory(`Добро пожаловать, ${user.login}!`);
             await fetchUnreadSummary(false);
@@ -530,7 +654,7 @@
 
     function uploadFile(file) {
         const formData = new FormData();
-        formData.append('image', file);
+        formData.append('image', file); // сервер ожидает поле 'image'
 
         fetch(`${API_BASE}/upload_image`, {
             method: 'POST',
@@ -545,14 +669,9 @@
                 appendHistory(`Ошибка загрузки: ${data.error}`);
             } else {
                 const mediaId = data.result.media_id;
-                const type = data.result.type;
-                if (type === 'image') {
-                    pendingImageId = mediaId;
-                    appendHistory(`✅ Изображение загружено. ID: ${mediaId}. Оно будет прикреплено к следующему отправленному сообщению.`);
-                } else {
-                    pendingAudioId = mediaId;
-                    appendHistory(`🎵 Аудио загружено. ID: ${mediaId}. Оно будет прикреплено к следующему отправленному сообщению.`);
-                }
+                const fileType = data.result.type; // image, audio, text, other
+                pendingFileId = mediaId;
+                appendHistory(`✅ Файл загружен. ID: ${mediaId}. Он будет прикреплён к следующему отправленному сообщению.`);
             }
         })
         .catch(err => {
@@ -620,9 +739,8 @@
                 return;
             }
             const message = args.slice(1).join(' ');
-            apiCommand('написать', { to_id: toId, message, image_id: pendingImageId, audio_id: pendingAudioId });
-            pendingImageId = null;
-            pendingAudioId = null;
+            apiCommand('написать', { to_id: toId, message, image_id: pendingFileId, audio_id: pendingFileId });
+            pendingFileId = null;
         },
         'профиль': (args) => {
             if (args.length < 1) {
@@ -664,13 +782,12 @@
             token = null;
             lastUnreadHash = null;
             autoReadEnabled = false;
-            pendingImageId = null;
-            pendingAudioId = null;
+            pendingFileId = null;
             disconnectWebSocket();
             setTextColor('белый');
             clearSession();
             appendHistory('Вы вышли из аккаунта.');
-            appendHistory('Доступные команды: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку, прослушать музыку, онлайн');
+            appendHistory('Доступные команды: вход, регистрация, загрузить, прочитать файл, онлайн');
         },
         'онлайн': fetchOnlineUsers,
         'каналы': fetchMyChannels,
@@ -721,9 +838,8 @@
             }
             const name = args[0];
             const message = args.slice(1).join(' ');
-            channelSend(name, message, pendingImageId, pendingAudioId);
-            pendingImageId = null;
-            pendingAudioId = null;
+            channelSend(name, message, pendingFileId);
+            pendingFileId = null;
         },
         'канал прочитать': (args) => {
             if (args.length < 1) {
@@ -741,17 +857,13 @@
             const name = args.join(' ');
             channelDelete(name);
         },
-        'загрузить картинку': () => {
-            fileInput.accept = 'image/png, image/jpeg, image/gif, image/bmp, image/webp';
+        'загрузить': () => {
+            fileInput.accept = '*/*';
             fileInput.click();
         },
-        'загрузить музыку': () => {
-            fileInput.accept = 'audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac';
-            fileInput.click();
-        },
-        'прочитать картинку': (args) => {
+        'прочитать файл': (args) => {
             if (args.length < 1) {
-                appendHistory('Использование: прочитать картинку [ID]');
+                appendHistory('Использование: прочитать файл [ID]');
                 return;
             }
             const id = args[0];
@@ -759,36 +871,23 @@
                 appendHistory('Ошибка: ID должен быть числом');
                 return;
             }
-            openMediaWindow('image', id);
-        },
-        'прослушать музыку': (args) => {
-            if (args.length < 1) {
-                appendHistory('Использование: прослушать музыку [ID]');
-                return;
-            }
-            const id = args[0];
-            if (isNaN(id)) {
-                appendHistory('Ошибка: ID должен быть числом');
-                return;
-            }
-            openMediaWindow('audio', id);
+            window.openFileWindow(id);
         },
         'открепить': () => {
-            pendingImageId = null;
-            pendingAudioId = null;
-            appendHistory('Прикреплённые медиа сброшены.');
+            pendingFileId = null;
+            appendHistory('Прикреплённый файл сброшен.');
         },
         'аватар': (args) => {
             if (args.length < 1) {
-                appendHistory('Использование: аватар [ID изображения]');
+                appendHistory('Использование: аватар [ID файла]');
                 return;
             }
-            const imageId = args[0];
-            if (isNaN(imageId)) {
+            const fileId = args[0];
+            if (isNaN(fileId)) {
                 appendHistory('Ошибка: ID должен быть числом');
                 return;
             }
-            apiCommand('аватар', { image_id: imageId });
+            apiCommand('аватар', { image_id: fileId });
         }
     };
 
@@ -802,7 +901,7 @@
     // ---------- Автодополнение ----------
     function getAllCommands() {
         if (!authenticated) {
-            return ['вход', 'регистрация', 'загрузить картинку', 'загрузить музыку', 'прочитать картинку', 'прослушать музыку', 'онлайн'];
+            return ['вход', 'регистрация', 'загрузить', 'прочитать файл', 'онлайн'];
         } else {
             return Object.keys(commands);
         }
@@ -956,20 +1055,20 @@
         } else if (command === 'регистрация' || command === 'register') {
             mode = 'awaiting_register_login';
             appendHistory('Придумайте логин:');
-        } else if (command === 'загрузить' && parts[1] === 'картинку') {
-            fileInput.accept = 'image/png, image/jpeg, image/gif, image/bmp, image/webp';
+        } else if (command === 'загрузить') {
+            fileInput.accept = '*/*';
             fileInput.click();
-        } else if (command === 'загрузить' && parts[1] === 'музыку') {
-            fileInput.accept = 'audio/mp3, audio/wav, audio/ogg, audio/m4a, audio/flac';
-            fileInput.click();
-        } else if (command === 'прочитать' && parts[1] === 'картинку' && parts[2]) {
-            openMediaWindow('image', parts[2]);
-        } else if (command === 'прослушать' && parts[1] === 'музыку' && parts[2]) {
-            openMediaWindow('audio', parts[2]);
+        } else if (command === 'прочитать' && parts[1] === 'файл' && parts[2]) {
+            const id = parts[2];
+            if (isNaN(id)) {
+                appendHistory('Ошибка: ID должен быть числом');
+            } else {
+                window.openFileWindow(id);
+            }
         } else if (command === 'онлайн') {
             fetchOnlineUsers();
         } else {
-            appendHistory('Неизвестная команда. Доступные: вход, регистрация, загрузить картинку, загрузить музыку, прочитать картинку [id], прослушать музыку [id], онлайн');
+            appendHistory('Неизвестная команда. Доступные: вход, регистрация, загрузить, прочитать файл [ID], онлайн');
         }
     }
 
