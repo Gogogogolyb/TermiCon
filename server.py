@@ -3,21 +3,32 @@ import datetime
 import random
 import os
 import uuid
-from flask import Flask, request, jsonify, g, send_from_directory
+import logging
+import magic
+from flask import Flask, request, jsonify, g, send_from_directory, abort
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
 
 app = Flask(__name__, static_folder='.', static_url_path='')
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB для аудио
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'mp3', 'wav', 'ogg', 'm4a', 'flac'}
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
+ALLOWED_MIME_TYPES = {
+    'image/png', 'image/jpeg', 'image/gif', 'image/bmp', 'image/webp',
+    'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/flac'
+}
+EXTENSION_TO_MIME = {
+    'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+    'gif': 'image/gif', 'bmp': 'image/bmp', 'webp': 'image/webp',
+    'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
+    'm4a': 'audio/mp4', 'flac': 'audio/flac'
+}
 
 CORS(app)
-
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -29,6 +40,17 @@ limiter = Limiter(
 )
 
 DATABASE = 'terminal.db'
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def get_db():
     db = getattr(g, '_database', None)
@@ -145,7 +167,7 @@ def init_db():
                 stored_filename TEXT NOT NULL UNIQUE,
                 uploader_id INTEGER NOT NULL,
                 uploaded TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                duration INTEGER,  -- длительность в секундах (можно заполнять позже)
+                duration INTEGER,
                 FOREIGN KEY(uploader_id) REFERENCES users(id)
             )
         ''')
@@ -160,12 +182,112 @@ def init_db():
 
         cursor.execute("INSERT OR IGNORE INTO users (id, login, password_hash) VALUES (0, 'system', '')")
         db.commit()
+        logger.info("Database initialized")
 
 init_db()
 
-# ---------- Вспомогательные функции ----------
+# ---------- Декораторы ----------
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user_id = request.get_json().get('user_id') if request.is_json else request.args.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'Не указан user_id'}), 401
+        db = get_db()
+        user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+        if not user:
+            return jsonify({'error': 'Пользователь не найден'}), 401
+        g.user = user
+        return f(*args, **kwargs)
+    return decorated
+
+def requires_channel(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        data = request.get_json()
+        channel_name = data.get('channel_name') if data else None
+        if not channel_name:
+            return jsonify({'error': 'Не указан канал'}), 400
+        db = get_db()
+        channel = db.execute('SELECT * FROM channels WHERE name = ? AND active = 1', (channel_name,)).fetchone()
+        if not channel:
+            return jsonify({'error': 'Канал не найден'}), 404
+        g.channel = channel
+        return f(*args, **kwargs)
+    return decorated
+
+def owns_media(media_type):
+    def decorator(f):
+        @wraps(f)
+        def decorated(media_id, *args, **kwargs):
+            user_id = request.args.get('user_id')
+            if not user_id:
+                # Пытаемся получить из JSON
+                if request.is_json:
+                    user_id = request.get_json().get('user_id')
+            if not user_id:
+                return jsonify({'error': 'Не указан user_id'}), 401
+            db = get_db()
+            user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+            if not user:
+                return jsonify({'error': 'Пользователь не найден'}), 401
+            g.user = user
+
+            # Проверка прав доступа к медиа
+            if media_type == 'image':
+                media = db.execute('SELECT * FROM images WHERE id = ?', (media_id,)).fetchone()
+            else:
+                media = db.execute('SELECT * FROM audio WHERE id = ?', (media_id,)).fetchone()
+            if not media:
+                abort(404)
+
+            # Если пользователь является владельцем файла — разрешаем
+            if media['uploader_id'] == user_id:
+                g.media = media
+                return f(media_id, *args, **kwargs)
+
+            # Проверяем, участвует ли пользователь в диалогах/каналах, где использовался этот файл
+            if media_type == 'image':
+                # Проверка личных сообщений
+                msg = db.execute('''
+                    SELECT 1 FROM messages
+                    WHERE image_id = ? AND (from_id = ? OR to_id = ?)
+                ''', (media_id, user_id, user_id)).fetchone()
+                if not msg:
+                    # Проверка сообщений каналов
+                    msg = db.execute('''
+                        SELECT 1 FROM channel_messages cm
+                        JOIN channel_subscribers cs ON cm.channel_id = cs.channel_id
+                        WHERE cm.image_id = ? AND cs.user_id = ?
+                    ''', (media_id, user_id)).fetchone()
+            else:  # audio
+                msg = db.execute('''
+                    SELECT 1 FROM messages
+                    WHERE audio_id = ? AND (from_id = ? OR to_id = ?)
+                ''', (media_id, user_id, user_id)).fetchone()
+                if not msg:
+                    msg = db.execute('''
+                        SELECT 1 FROM channel_messages cm
+                        JOIN channel_subscribers cs ON cm.channel_id = cs.channel_id
+                        WHERE cm.audio_id = ? AND cs.user_id = ?
+                    ''', (media_id, user_id)).fetchone()
+
+            if not msg:
+                abort(403)
+
+            g.media = media
+            return f(media_id, *args, **kwargs)
+        return decorated
+    return decorator
+
+# ---------- Вспомогательные функции (без изменений, но добавлены новые) ----------
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in EXTENSION_TO_MIME
+
+def validate_mime(file):
+    mime = magic.from_buffer(file.read(2048), mime=True)
+    file.seek(0)
+    return mime in ALLOWED_MIME_TYPES
 
 def get_user_by_login(login):
     db = get_db()
@@ -192,6 +314,7 @@ def create_user(login, password):
     db.execute('INSERT INTO users (id, login, password_hash) VALUES (?, ?, ?)',
                (user_id, login, password_hash))
     db.commit()
+    logger.info(f"New user registered: {login} (ID: {user_id})")
     return user_id
 
 def update_last_seen(user_id):
@@ -232,7 +355,8 @@ def get_undelivered_messages(user_id, from_id=None):
     messages = cursor.fetchall()
     if messages:
         ids = [m['id'] for m in messages]
-        db.execute('UPDATE messages SET delivered = 1 WHERE id IN ({})'.format(','.join('?' * len(ids))), ids)
+        placeholders = ','.join('?' * len(ids))
+        db.execute(f'UPDATE messages SET delivered = 1 WHERE id IN ({placeholders})', ids)
         db.commit()
     result = []
     for m in messages:
@@ -250,7 +374,17 @@ def get_undelivered_messages(user_id, from_id=None):
 def save_message(from_id, to_id, content, image_id=None, audio_id=None):
     if len(content) > 1000:
         raise ValueError("Сообщение слишком длинное (макс. 1000 символов)")
+    # Проверка принадлежности медиа
     db = get_db()
+    if image_id:
+        img = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, from_id)).fetchone()
+        if not img:
+            raise ValueError("Изображение не найдено или не принадлежит вам")
+    if audio_id:
+        aud = db.execute('SELECT id FROM audio WHERE id = ? AND uploader_id = ?', (audio_id, from_id)).fetchone()
+        if not aud:
+            raise ValueError("Аудио не найдено или не принадлежит вам")
+
     db.execute('''
         INSERT INTO messages (from_id, to_id, content, delivered, image_id, audio_id) VALUES (?, ?, ?, 0, ?, ?)
     ''', (from_id, to_id, content, image_id, audio_id))
@@ -286,6 +420,16 @@ def add_channel_message(channel_id, user_id, content, image_id=None, audio_id=No
     if len(content) > 1000:
         raise ValueError("Сообщение слишком длинное (макс. 1000 символов)")
     db = get_db()
+    # Проверка принадлежности медиа
+    if image_id:
+        img = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, user_id)).fetchone()
+        if not img:
+            raise ValueError("Изображение не найдено или не принадлежит вам")
+    if audio_id:
+        aud = db.execute('SELECT id FROM audio WHERE id = ? AND uploader_id = ?', (audio_id, user_id)).fetchone()
+        if not aud:
+            raise ValueError("Аудио не найдено или не принадлежит вам")
+
     cursor = db.cursor()
     cursor.execute('''
         INSERT INTO channel_messages (channel_id, user_id, content, image_id, audio_id) VALUES (?, ?, ?, ?, ?)
@@ -295,7 +439,8 @@ def add_channel_message(channel_id, user_id, content, image_id=None, audio_id=No
     cursor = db.execute('SELECT user_id FROM channel_subscribers WHERE channel_id = ?', (channel_id,))
     subscribers = [row['user_id'] for row in cursor.fetchall()]
     for sub_id in subscribers:
-        socketio.emit(f'user_{sub_id}_new_channel_message', {'channel': channel_id}, room=f'user_{sub_id}')
+        if sub_id != user_id:  # не отправляем уведомление автору
+            socketio.emit(f'user_{sub_id}_new_channel_message', {'channel': channel_id}, room=f'user_{sub_id}')
     return msg_id
 
 def get_channel_unread_count(user_id, channel_id):
@@ -322,7 +467,7 @@ def mark_channel_messages_read(user_id, channel_id, up_to_message_id=None):
     ''', (user_id, channel_id, up_to_message_id))
     db.commit()
 
-def get_channel_messages(user_id, channel_id):
+def get_channel_messages(user_id, channel_id, limit=50, offset=0):
     db = get_db()
     cursor = db.execute('SELECT last_read_message_id FROM channel_read_status WHERE user_id = ? AND channel_id = ?', (user_id, channel_id))
     row = cursor.fetchone()
@@ -333,7 +478,8 @@ def get_channel_messages(user_id, channel_id):
         JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.id > ?
         ORDER BY m.timestamp
-    ''', (channel_id, last_read))
+        LIMIT ? OFFSET ?
+    ''', (channel_id, last_read, limit, offset))
     messages = cursor.fetchall()
     if messages:
         max_id = max(m['id'] for m in messages)
@@ -417,6 +563,7 @@ def get_online_users(minutes=2):
 
 # ---------- Эндпоинты ----------
 @app.route('/register', methods=['POST'])
+@limiter.limit("3 per minute")
 def register():
     data = request.get_json()
     if not data or 'login' not in data or 'password' not in data:
@@ -429,319 +576,355 @@ def register():
         return jsonify({'error': 'Логин или пароль слишком длинные'}), 400
     if get_user_by_login(login):
         return jsonify({'error': 'Пользователь с таким логином уже существует'}), 400
-    user_id = create_user(login, password)
-    return jsonify({'result': [f'Регистрация успешна. Ваш ID: {user_id}'], 'error': None}), 201
+    try:
+        user_id = create_user(login, password)
+        return jsonify({'result': [f'Регистрация успешна. Ваш ID: {user_id}'], 'error': None}), 201
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/login', methods=['POST'])
+@limiter.limit("5 per minute")
 def login():
     data = request.get_json()
     if not data or 'login' not in data or 'password' not in data:
         return jsonify({'error': 'Необходимо указать логин и пароль'}), 400
     login = data['login'].strip()
     password = data['password']
-    user = get_user_by_login(login)
-    if not user or not check_password_hash(user['password_hash'], password):
-        return jsonify({'error': 'Неверный логин или пароль'}), 401
-    update_last_seen(user['id'])
-    return jsonify({
-        'result': [{
-            'id': user['id'],
-            'login': user['login'],
-            'registered': user['registered'],
-            'avatar_id': user['avatar_id'],
-            'color_pref': user['color_pref']
-        }],
-        'error': None
-    })
+    try:
+        user = get_user_by_login(login)
+        if not user or not check_password_hash(user['password_hash'], password):
+            return jsonify({'error': 'Неверный логин или пароль'}), 401
+        update_last_seen(user['id'])
+        logger.info(f"User logged in: {login} (ID: {user['id']})")
+        return jsonify({
+            'result': [{
+                'id': user['id'],
+                'login': user['login'],
+                'registered': user['registered'],
+                'avatar_id': user['avatar_id'],
+                'color_pref': user['color_pref']
+            }],
+            'error': None
+        })
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
-@app.route('/unread_summary', methods=['GET'])
-def unread_summary():
-    user_id = request.args.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'Не указан user_id'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    personal = get_unread_summary(user_id)
-    channels = get_channels_unread_summary(user_id)
-    return jsonify({'result': {'personal': personal, 'channels': channels}, 'error': None})
-
-@app.route('/read_messages', methods=['POST'])
-def read_messages():
+@app.route('/check_session', methods=['POST'])
+def check_session():
     data = request.get_json()
     user_id = data.get('user_id')
     if not user_id:
         return jsonify({'error': 'Не указан user_id'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
+    try:
+        user = get_user_by_id(user_id)
+        if not user:
+            return jsonify({'error': 'Пользователь не найден'}), 404
+        return jsonify({
+            'result': {
+                'id': user['id'],
+                'login': user['login'],
+                'registered': user['registered'],
+                'avatar_id': user['avatar_id'],
+                'color_pref': user['color_pref']
+            },
+            'error': None
+        })
+    except Exception as e:
+        logger.error(f"Check session error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
+
+@app.route('/unread_summary', methods=['GET'])
+@requires_auth
+def unread_summary():
+    user_id = g.user['id']
+    try:
+        personal = get_unread_summary(user_id)
+        channels = get_channels_unread_summary(user_id)
+        return jsonify({'result': {'personal': personal, 'channels': channels}, 'error': None})
+    except Exception as e:
+        logger.error(f"Unread summary error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
+
+@app.route('/read_messages', methods=['POST'])
+@requires_auth
+def read_messages():
+    user_id = g.user['id']
+    data = request.get_json()
     from_id = data.get('from_id')
-    update_last_seen(user_id)
-    messages = get_undelivered_messages(user_id, from_id)
-    return jsonify({'result': messages, 'error': None})
+    try:
+        update_last_seen(user_id)
+        messages = get_undelivered_messages(user_id, from_id)
+        return jsonify({'result': messages, 'error': None})
+    except Exception as e:
+        logger.error(f"Read messages error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/channel/create', methods=['POST'])
 @limiter.limit("10 per minute")
+@requires_auth
 def channel_create():
+    user_id = g.user['id']
     data = request.get_json()
-    user_id = data.get('user_id')
     name = data.get('name', '').strip()
-    if not user_id or not name:
-        return jsonify({'error': 'Не указан user_id или название канала'}), 400
+    if not name:
+        return jsonify({'error': 'Не указано название канала'}), 400
     if len(name) > 100:
         return jsonify({'error': 'Название канала слишком длинное'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
     if get_channel_by_name(name):
         return jsonify({'error': 'Канал с таким названием уже существует'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('INSERT INTO channels (name, owner_id) VALUES (?, ?)', (name, user_id))
-    channel_id = cursor.lastrowid
-    subscribe_user(channel_id, user_id)
-    db.commit()
-    return jsonify({'result': [f'Канал "{name}" создан. Вы автоматически подписаны.'], 'error': None})
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute('INSERT INTO channels (name, owner_id) VALUES (?, ?)', (name, user_id))
+        channel_id = cursor.lastrowid
+        subscribe_user(channel_id, user_id)
+        db.commit()
+        logger.info(f"Channel created: {name} by user {user_id}")
+        return jsonify({'result': [f'Канал "{name}" создан. Вы автоматически подписаны.'], 'error': None})
+    except Exception as e:
+        logger.error(f"Channel create error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/channel/subscribe', methods=['POST'])
+@requires_auth
+@requires_channel
 def channel_subscribe():
-    data = request.get_json()
-    user_id = data.get('user_id')
-    channel_name = data.get('channel_name', '').strip()
-    if not user_id or not channel_name:
-        return jsonify({'error': 'Не указан user_id или название канала'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    channel = get_channel_by_name(channel_name)
-    if not channel:
-        return jsonify({'error': 'Канал не найден'}), 404
+    user_id = g.user['id']
+    channel = g.channel
     if is_subscriber(channel['id'], user_id):
         return jsonify({'result': ['Вы уже подписаны на этот канал.'], 'error': None})
-    subscribe_user(channel['id'], user_id)
-    return jsonify({'result': [f'Вы подписались на канал "{channel_name}".'], 'error': None})
+    try:
+        subscribe_user(channel['id'], user_id)
+        return jsonify({'result': [f'Вы подписались на канал "{channel["name"]}".'], 'error': None})
+    except Exception as e:
+        logger.error(f"Channel subscribe error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/channel/unsubscribe', methods=['POST'])
+@requires_auth
+@requires_channel
 def channel_unsubscribe():
-    data = request.get_json()
-    user_id = data.get('user_id')
-    channel_name = data.get('channel_name', '').strip()
-    if not user_id or not channel_name:
-        return jsonify({'error': 'Не указан user_id или название канала'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    channel = get_channel_by_name(channel_name)
-    if not channel:
-        return jsonify({'error': 'Канал не найден'}), 404
+    user_id = g.user['id']
+    channel = g.channel
     if not is_subscriber(channel['id'], user_id):
         return jsonify({'result': ['Вы не подписаны на этот канал.'], 'error': None})
-    unsubscribe_user(channel['id'], user_id)
-    return jsonify({'result': [f'Вы отписались от канала "{channel_name}".'], 'error': None})
+    try:
+        unsubscribe_user(channel['id'], user_id)
+        return jsonify({'result': [f'Вы отписались от канала "{channel["name"]}".'], 'error': None})
+    except Exception as e:
+        logger.error(f"Channel unsubscribe error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/channel/send', methods=['POST'])
 @limiter.limit("10 per minute")
+@requires_auth
+@requires_channel
 def channel_send():
+    user_id = g.user['id']
+    channel = g.channel
     data = request.get_json()
-    user_id = data.get('user_id')
-    channel_name = data.get('channel_name', '').strip()
     content = data.get('content', '').strip()
     image_id = data.get('image_id')
     audio_id = data.get('audio_id')
-    if not user_id or not channel_name or (not content and not image_id and not audio_id):
-        return jsonify({'error': 'Не указан user_id, название канала или сообщение/изображение/аудио'}), 400
+    if not content and not image_id and not audio_id:
+        return jsonify({'error': 'Не указано сообщение, изображение или аудио'}), 400
     if content and len(content) > 1000:
         return jsonify({'error': 'Сообщение слишком длинное (макс. 1000 символов)'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    channel = get_channel_by_name(channel_name)
-    if not channel:
-        return jsonify({'error': 'Канал не найден'}), 404
     if channel['owner_id'] != user_id:
         return jsonify({'error': 'Только владелец канала может отправлять сообщения'}), 403
-    update_last_seen(user_id)
-    add_channel_message(channel['id'], user_id, content or '', image_id, audio_id)
-    return jsonify({'result': [f'Сообщение отправлено в канал "{channel_name}".'], 'error': None})
+    try:
+        update_last_seen(user_id)
+        add_channel_message(channel['id'], user_id, content or '', image_id, audio_id)
+        return jsonify({'result': [f'Сообщение отправлено в канал "{channel["name"]}".'], 'error': None})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Channel send error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/channel/read', methods=['POST'])
+@requires_auth
+@requires_channel
 def channel_read():
+    user_id = g.user['id']
+    channel = g.channel
     data = request.get_json()
-    user_id = data.get('user_id')
-    channel_name = data.get('channel_name', '').strip()
-    if not user_id or not channel_name:
-        return jsonify({'error': 'Не указан user_id или название канала'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    channel = get_channel_by_name(channel_name)
-    if not channel:
-        return jsonify({'error': 'Канал не найден'}), 404
+    limit = data.get('limit', 50)
+    offset = data.get('offset', 0)
     if not is_subscriber(channel['id'], user_id):
         return jsonify({'error': 'Вы не подписаны на этот канал'}), 403
-    update_last_seen(user_id)
-    messages = get_channel_messages(user_id, channel['id'])
-    result_lines = [f'Новые сообщения из канала "{channel_name}":']
-    if messages:
-        for msg in messages:
-            line = f'[{msg["timestamp"]}] {msg["user_login"]}: {msg["content"]}'
-            if msg['image_id']:
-                line += f' [Изображение ID: {msg["image_id"]}]'
-            if msg['audio_id']:
-                line += f' [Аудио ID: {msg["audio_id"]}]'
-            result_lines.append(line)
-    else:
-        result_lines.append('Нет новых сообщений.')
-    return jsonify({'result': result_lines, 'error': None})
+    try:
+        update_last_seen(user_id)
+        messages = get_channel_messages(user_id, channel['id'], limit, offset)
+        result_lines = [f'Новые сообщения из канала "{channel["name"]}":']
+        if messages:
+            for msg in messages:
+                line = f'[{msg["timestamp"]}] {msg["user_login"]}: {msg["content"]}'
+                if msg['image_id']:
+                    line += f' [Изображение ID: {msg["image_id"]}]'
+                if msg['audio_id']:
+                    line += f' [Аудио ID: {msg["audio_id"]}]'
+                result_lines.append(line)
+        else:
+            result_lines.append('Нет новых сообщений.')
+        return jsonify({'result': result_lines, 'error': None})
+    except Exception as e:
+        logger.error(f"Channel read error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/channel/delete', methods=['POST'])
+@requires_auth
+@requires_channel
 def channel_delete():
-    data = request.get_json()
-    user_id = data.get('user_id')
-    channel_name = data.get('channel_name', '').strip()
-    if not user_id or not channel_name:
-        return jsonify({'error': 'Не указан user_id или название канала'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    channel = get_channel_by_name(channel_name)
-    if not channel:
-        return jsonify({'error': 'Канал не найден'}), 404
-    ok, msg = delete_channel(channel['id'], user_id)
-    if not ok:
-        return jsonify({'error': msg}), 403
-    return jsonify({'result': [msg], 'error': None})
+    user_id = g.user['id']
+    channel = g.channel
+    try:
+        ok, msg = delete_channel(channel['id'], user_id)
+        if not ok:
+            return jsonify({'error': msg}), 403
+        return jsonify({'result': [msg], 'error': None})
+    except Exception as e:
+        logger.error(f"Channel delete error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/command', methods=['POST'])
 @limiter.limit("30 per minute")
+@requires_auth
 def handle_command():
+    user_id = g.user['id']
     data = request.get_json()
-    user_id = data.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'Не указан ID пользователя'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
     command = data.get('command', '').strip().lower()
     args = data.get('args', {})
     result_lines = []
-    if command == 'написать':
-        to_id = args.get('to_id')
-        message = args.get('message', '').strip()
-        image_id = args.get('image_id')
-        audio_id = args.get('audio_id')
-        if not to_id or (not message and not image_id and not audio_id):
-            result_lines.append('Ошибка: укажите ID получателя и сообщение, изображение или аудио.')
-        else:
-            if int(to_id) == user_id:
-                result_lines.append('Ошибка: нельзя отправить сообщение самому себе.')
+    try:
+        if command == 'написать':
+            to_id = args.get('to_id')
+            message = args.get('message', '').strip()
+            image_id = args.get('image_id')
+            audio_id = args.get('audio_id')
+            if not to_id or (not message and not image_id and not audio_id):
+                result_lines.append('Ошибка: укажите ID получателя и сообщение, изображение или аудио.')
             else:
-                recipient = get_user_by_id(to_id)
-                if not recipient:
-                    result_lines.append(f'Ошибка: пользователь с ID {to_id} не найден')
+                if int(to_id) == user_id:
+                    result_lines.append('Ошибка: нельзя отправить сообщение самому себе.')
                 else:
-                    try:
-                        save_message(user_id, to_id, message or '', image_id, audio_id)
-                        result_lines.append(f'Сообщение для {recipient["login"]} (ID {to_id}) отправлено')
-                        update_last_seen(user_id)
-                    except ValueError as e:
-                        result_lines.append(f'Ошибка: {e}')
-    elif command == 'профиль':
-        profile_id = args.get('profile_id')
-        if not profile_id:
-            result_lines.append('Ошибка: укажите ID пользователя.')
-        else:
-            profile_user = get_user_by_id(profile_id)
-            if not profile_user:
-                result_lines.append(f'Пользователь с ID {profile_id} не найден')
+                    recipient = get_user_by_id(to_id)
+                    if not recipient:
+                        result_lines.append(f'Ошибка: пользователь с ID {to_id} не найден')
+                    else:
+                        try:
+                            save_message(user_id, to_id, message or '', image_id, audio_id)
+                            result_lines.append(f'Сообщение для {recipient["login"]} (ID {to_id}) отправлено')
+                            update_last_seen(user_id)
+                        except ValueError as e:
+                            result_lines.append(f'Ошибка: {e}')
+        elif command == 'профиль':
+            profile_id = args.get('profile_id')
+            if not profile_id:
+                result_lines.append('Ошибка: укажите ID пользователя.')
             else:
-                online = is_online(profile_id)
-                status = 'в сети' if online else 'оффлайн'
-                result_lines.append(f'Логин: {profile_user["login"]}')
-                result_lines.append(f'ID: {profile_user["id"]}')
-                result_lines.append(f'Дата регистрации: {profile_user["registered"]}')
-                if profile_user['avatar_id']:
-                    result_lines.append(f'Аватар ID: {profile_user["avatar_id"]}')
-                result_lines.append(f'Цвет текста: {profile_user["color_pref"]}')
-                result_lines.append(f'Статус: {status}')
-    elif command == 'аватар':
-        image_id = args.get('image_id')
-        if not image_id:
-            result_lines.append('Ошибка: укажите ID изображения.')
-        else:
-            db = get_db()
-            cursor = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, user_id))
-            if not cursor.fetchone():
-                result_lines.append('Ошибка: изображение не найдено или вы не являетесь его владельцем.')
+                profile_user = get_user_by_id(profile_id)
+                if not profile_user:
+                    result_lines.append(f'Пользователь с ID {profile_id} не найден')
+                else:
+                    online = is_online(profile_id)
+                    status = 'в сети' if online else 'оффлайн'
+                    result_lines.append(f'Логин: {profile_user["login"]}')
+                    result_lines.append(f'ID: {profile_user["id"]}')
+                    result_lines.append(f'Дата регистрации: {profile_user["registered"]}')
+                    if profile_user['avatar_id']:
+                        result_lines.append(f'Аватар ID: {profile_user["avatar_id"]}')
+                    result_lines.append(f'Цвет текста: {profile_user["color_pref"]}')
+                    result_lines.append(f'Статус: {status}')
+        elif command == 'аватар':
+            image_id = args.get('image_id')
+            if not image_id:
+                result_lines.append('Ошибка: укажите ID изображения.')
             else:
-                db.execute('UPDATE users SET avatar_id = ? WHERE id = ?', (image_id, user_id))
-                db.commit()
-                result_lines.append(f'Аватар установлен. ID изображения: {image_id}')
-                update_last_seen(user_id)
-    elif command == 'пинг':
-        result_lines.append('понг')
-    else:
-        result_lines.append(f'Неизвестная команда: {command}')
+                db = get_db()
+                cursor = db.execute('SELECT id FROM images WHERE id = ? AND uploader_id = ?', (image_id, user_id))
+                if not cursor.fetchone():
+                    result_lines.append('Ошибка: изображение не найдено или вы не являетесь его владельцем.')
+                else:
+                    db.execute('UPDATE users SET avatar_id = ? WHERE id = ?', (image_id, user_id))
+                    db.commit()
+                    result_lines.append(f'Аватар установлен. ID изображения: {image_id}')
+                    update_last_seen(user_id)
+        elif command == 'пинг':
+            result_lines.append('понг')
+        else:
+            result_lines.append(f'Неизвестная команда: {command}')
+    except Exception as e:
+        logger.error(f"Command error: {e}")
+        result_lines.append('Внутренняя ошибка сервера')
     return jsonify({'result': result_lines, 'error': None})
 
 @app.route('/online_users', methods=['GET'])
 def online_users():
     minutes = request.args.get('minutes', default=2, type=int)
-    users = get_online_users(minutes)
-    return jsonify({'result': users, 'error': None})
+    try:
+        users = get_online_users(minutes)
+        return jsonify({'result': users, 'error': None})
+    except Exception as e:
+        logger.error(f"Online users error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/my_channels', methods=['GET'])
+@requires_auth
 def my_channels():
-    user_id = request.args.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'Не указан user_id'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    channels = get_user_channels(user_id)
-    return jsonify({'result': channels, 'error': None})
+    user_id = g.user['id']
+    try:
+        channels = get_user_channels(user_id)
+        return jsonify({'result': channels, 'error': None})
+    except Exception as e:
+        logger.error(f"My channels error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/set_color', methods=['POST'])
+@requires_auth
 def set_color():
+    user_id = g.user['id']
     data = request.get_json()
-    user_id = data.get('user_id')
     color = data.get('color')
-    if not user_id or not color:
-        return jsonify({'error': 'Не указан user_id или цвет'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
+    if not color:
+        return jsonify({'error': 'Не указан цвет'}), 400
     valid_colors = ['зеленый', 'красный', 'синий', 'желтый', 'оранжевый', 'розовый', 'голубой']
     if color not in valid_colors:
         return jsonify({'error': f'Недопустимый цвет. Доступны: {", ".join(valid_colors)}'}), 400
-    db = get_db()
-    db.execute('UPDATE users SET color_pref = ? WHERE id = ?', (color, user_id))
-    db.commit()
-    update_last_seen(user_id)
-    return jsonify({'result': f'Цвет текста изменён на {color}', 'error': None})
+    try:
+        db = get_db()
+        db.execute('UPDATE users SET color_pref = ? WHERE id = ?', (color, user_id))
+        db.commit()
+        update_last_seen(user_id)
+        return jsonify({'result': f'Цвет текста изменён на {color}', 'error': None})
+    except Exception as e:
+        logger.error(f"Set color error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/upload_image', methods=['POST'])
+@requires_auth
 def upload_image():
-    user_id = request.form.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'Не указан user_id'}), 400
-    user = get_user_by_id(user_id)
-    if not user:
-        return jsonify({'error': 'Пользователь не найден'}), 404
+    user_id = g.user['id']
     if 'image' not in request.files:
         return jsonify({'error': 'Файл не загружен'}), 400
     file = request.files['image']
     if file.filename == '':
         return jsonify({'error': 'Файл не выбран'}), 400
     if not allowed_file(file.filename):
-        return jsonify({'error': 'Недопустимый тип файла. Разрешены: png, jpg, jpeg, gif, bmp, webp, mp3, wav, ogg, m4a, flac'}), 400
+        return jsonify({'error': 'Недопустимый тип файла по расширению'}), 400
+    if not validate_mime(file):
+        return jsonify({'error': 'Недопустимый MIME-тип файла'}), 400
+
     ext = file.filename.rsplit('.', 1)[1].lower()
     stored_filename = f"{uuid.uuid4().hex}.{ext}"
     file.save(os.path.join(app.config['UPLOAD_FOLDER'], stored_filename))
+
     db = get_db()
     cursor = db.cursor()
-    # Определяем тип: если аудио, сохраняем в audio, иначе в images
-    if ext in ['mp3', 'wav', 'ogg', 'm4a', 'flac']:
+    mime_type = EXTENSION_TO_MIME.get(ext, 'application/octet-stream')
+    if mime_type.startswith('audio/'):
         cursor.execute('''
             INSERT INTO audio (original_filename, stored_filename, uploader_id)
             VALUES (?, ?, ?)
@@ -757,25 +940,19 @@ def upload_image():
         db.commit()
         media_id = cursor.lastrowid
         media_type = 'image'
+
+    logger.info(f"File uploaded: {file.filename} (ID: {media_id}, type: {media_type}) by user {user_id}")
     return jsonify({'result': {'media_id': media_id, 'type': media_type}, 'error': None})
 
 @app.route('/image/<int:image_id>')
+@owns_media('image')
 def get_image(image_id):
-    db = get_db()
-    cursor = db.execute('SELECT stored_filename FROM images WHERE id = ?', (image_id,))
-    row = cursor.fetchone()
-    if not row:
-        return 'Изображение не найдено', 404
-    return send_from_directory(app.config['UPLOAD_FOLDER'], row['stored_filename'])
+    return send_from_directory(app.config['UPLOAD_FOLDER'], g.media['stored_filename'])
 
 @app.route('/audio/<int:audio_id>')
+@owns_media('audio')
 def get_audio(audio_id):
-    db = get_db()
-    cursor = db.execute('SELECT stored_filename FROM audio WHERE id = ?', (audio_id,))
-    row = cursor.fetchone()
-    if not row:
-        return 'Аудио не найдено', 404
-    return send_from_directory(app.config['UPLOAD_FOLDER'], row['stored_filename'])
+    return send_from_directory(app.config['UPLOAD_FOLDER'], g.media['stored_filename'])
 
 @app.route('/')
 def index():
@@ -784,11 +961,11 @@ def index():
 # ---------- WebSocket ----------
 @socketio.on('connect')
 def handle_connect():
-    print('Client connected')
+    logger.info('Client connected')
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('Client disconnected')
+    logger.info('Client disconnected')
 
 @socketio.on('subscribe')
 def handle_subscribe(data):
@@ -796,7 +973,7 @@ def handle_subscribe(data):
     if user_id:
         room = f'user_{user_id}'
         join_room(room)
-        print(f'User {user_id} subscribed to {room}')
+        logger.info(f'User {user_id} subscribed to {room}')
 
 @socketio.on('unsubscribe')
 def handle_unsubscribe(data):
@@ -804,7 +981,7 @@ def handle_unsubscribe(data):
     if user_id:
         room = f'user_{user_id}'
         leave_room(room)
-        print(f'User {user_id} unsubscribed from {room}')
+        logger.info(f'User {user_id} unsubscribed from {room}')
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=False)
