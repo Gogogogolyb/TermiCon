@@ -2,8 +2,8 @@ const CACHE_NAME = "v1";
 const urlsToCache = [
   "/",
   "/index.html",
-  "/icons/icon-192x192.png",
-  "/icons/icon-512-maskable.png",
+  "/icons/icon-192.png",
+  "/icons/icon-512.png",
 ];
 
 self.addEventListener("install", (event) => {
